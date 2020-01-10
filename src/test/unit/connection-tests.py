@@ -20,7 +20,8 @@ import unittest
 from rhsm.connection import UEPConnection, Restlib, ConnectionException, ConnectionSetupException, \
         BadCertificateException, RestlibException, GoneException, NetworkException, \
         RemoteServerException, drift_check, ExpiredIdentityCertException, UnauthorizedException, \
-        ForbiddenException, AuthenticationException, set_default_socket_timeout_if_python_2_3
+        ForbiddenException, AuthenticationException, set_default_socket_timeout_if_python_2_3, \
+        RateLimitExceededException
 
 from mock import Mock, patch
 from datetime import date
@@ -36,6 +37,26 @@ class ConnectionTests(unittest.TestCase):
         # UEPConnection:
         self.cp = UEPConnection(username="dummy", password="dummy",
                 handler="/Test/", insecure=True)
+
+    def test_load_manager_capabilities(self):
+        expected_capabilities = ['hypervisors_async', 'cores']
+        proper_status = {'version':'1',
+                         'result':True,
+                         'managerCapabilities':expected_capabilities}
+        improper_status = dict.copy(proper_status)
+        # Remove the managerCapabilities key from the dict
+        del improper_status['managerCapabilities']
+        self.cp.conn = Mock()
+        # The first call will return the proper_status, the second, the improper
+        # status
+        original_getStatus = self.cp.getStatus
+        self.cp.getStatus = Mock(side_effect=[proper_status,
+                                                     improper_status])
+        actual_capabilities = self.cp._load_manager_capabilities()
+        self.assertEquals(sorted(actual_capabilities),
+                          sorted(expected_capabilities))
+        self.assertEquals([], self.cp._load_manager_capabilities())
+        self.cp.getStatus = original_getStatus
 
     def test_get_environment_by_name_requires_owner(self):
         self.assertRaises(Exception, self.cp.getEnvironment, None, {"name": "env name"})
@@ -137,9 +158,11 @@ class RestlibValidateResponseTests(unittest.TestCase):
         self.request_type = "GET"
         self.handler = "https://server/path"
 
-    def vr(self, status, content):
+    def vr(self, status, content, headers=None):
         response = {'status': status,
                     'content': content}
+        if headers:
+            response['headers'] = headers
         #print "response", response
         self.restlib.validateResponse(response, self.request_type, self.handler)
 
@@ -155,22 +178,14 @@ class RestlibValidateResponseTests(unittest.TestCase):
 
     # 202 ACCEPTED
     def test_202_empty(self):
-        self.assertRaises(NetworkException, self.vr, "202", "")
+        self.vr("202", "")
 
     def test_202_none(self):
-        self.assertRaises(NetworkException, self.vr, "202", None)
+        self.vr("202", None)
 
     def test_202_json(self):
         content = u'{"something": "whatever"}'
-        try:
-            self.vr("202", content)
-        except RestlibException, e:
-            self.assertEquals("202", e.code)
-#            self.assertEquals(self.request_type, e.request_type)
-#            self.assertEquals(self.handler, e.handler)
-            self.assertTrue(e.msg is "")
-        else:
-            self.fail("Should of raised a Restlib exception")
+        self.vr("202", content)
 
     # 204 NO CONTENT
     # no exceptions is okay
@@ -334,6 +349,26 @@ class RestlibValidateResponseTests(unittest.TestCase):
             self.assertEquals("410", e.code)
         else:
             self.fail("Should have raised a GoneException")
+
+    def test_429_empty(self):
+        try:
+            self.vr("429", "")
+        except RateLimitExceededException, e:
+            self.assertEquals("429", e.code)
+        else:
+            self.fail("Should have raised a RateLimitExceededException")
+
+    def test_429_body(self):
+        content = u'{"errors": ["TooFast"]}'
+        headers = {'Retry-After': 20}
+        try:
+            self.vr("429", content, headers)
+        except RateLimitExceededException, e:
+            self.assertEquals(20, e.retry_after)
+            self.assertEquals("TooFast", e.msg)
+            self.assertEquals("429", e.code)
+        else:
+            self.fail("Should have raised a RateLimitExceededException")
 
     def test_500_empty(self):
         try:

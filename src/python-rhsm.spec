@@ -8,9 +8,11 @@
 # simplejson is not available in RHEL 7 at all.
 %global use_simplejson (0%{?rhel} && 0%{?rhel} == 5)
 
+%global _hardened_build 1
+%{!?__global_ldflags: %global __global_ldflags -Wl,-z,relro -Wl,-z,now}
 
 Name: python-rhsm
-Version: 1.14.3
+Version: 1.16.6
 Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
@@ -48,7 +50,7 @@ entitlements, certificates, and access to content.
 
 %build
 # create a version.py with the rpm version info
-PYTHON_RHSM_VERSION=%{version} PYTHON_RHSM_RELEASE=%{release} %{__python} setup.py build
+PYTHON_RHSM_VERSION=%{version} PYTHON_RHSM_RELEASE=%{release} CFLAGS="%{optflags}" LDFLAGS="%{__global_ldflags}" %{__python} setup.py build
 
 %install
 rm -rf %{buildroot}
@@ -72,6 +74,64 @@ rm -rf %{buildroot}
 %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
+* Tue Jan 19 2016 Christopher Snyder <csnyder@redhat.com> 1.16.6-1
+- 1297337: change server strings to new default (wpoteat@redhat.com)
+
+* Wed Jan 06 2016 Christopher Snyder <csnyder@redhat.com> 1.16.5-1
+- 1271158: Updates documentation to better explain when exceptions are thrown
+  (csnyder@redhat.com)
+- 1272203: Default used in place of empty config entry (wpoteat@redhat.com)
+- 1284683: Entitlement certificate path checking allows for listing files
+  (wpoteat@redhat.com)
+- Fedora 21 is end of life. (awood@redhat.com)
+
+* Fri Dec 04 2015 Alex Wood <awood@redhat.com> 1.16.4-1
+- HypervisorCheckIn now accepts options as a keyword argument,
+  options.reporter_id is now sent if provided (csnyder@redhat.com)
+
+* Tue Dec 01 2015 Christopher Snyder <csnyder@redhat.com> 1.16.3-1
+- Added release target for RHEL 6.8 (crog@redhat.com)
+- 1198178: Adds wrapper method to allow removal of entitlements by pool id
+  (csnyder@redhat.com)
+- Expand the docs and comments about GoneException. (alikins@redhat.com)
+- Adieu dgoodwin. (awood@redhat.com)
+
+* Wed Sep 02 2015 Alex Wood <awood@redhat.com> 1.16.2-1
+- Adds RateLimitExceededException which is raised in response to 429 from the
+  remote host (csnyder@redhat.com)
+- 1242057: This cert is no longer used and can be removed (wpoteat@redhat.com)
+
+* Thu Aug 13 2015 Alex Wood <awood@redhat.com> 1.16.1-1
+- 1247890: KeyErrors are now caught when checking manager capabilities
+  (csnyder@redhat.com)
+- Add user-agent to rhsm requests. (alikins@redhat.com)
+
+* Thu Jul 23 2015 Alex Wood <awood@redhat.com> 1.16.0-1
+- Bump to version 1.16 (crog@redhat.com)
+
+* Fri Jul 10 2015 Chris Rog <crog@redhat.com> 1.15.4-1
+- 
+
+* Tue Jul 07 2015 Adrian Likins <alikins@redhat.com> 1.15.3-1
+- Define global_ld_flags when not already defined. (awood@redhat.com)
+- Adding tests for 202s from alikins/AsyncBind (csnyder@redhat.com)
+- Updates to accomodate candlepin/virt-who/csnyder/new_report_api
+  (csnyder@redhat.com)
+- Adding jobStatus helper methods from alikins/AsyncBind (csnyder@redhat.com)
+- HypervisorCheckIn now uses the new API, if available (csnyder@redhat.com)
+
+* Mon Jun 22 2015 Chris Rog <crog@redhat.com> 1.15.2-1
+- Added releaser configuration for RHEL 7.2 (crog@redhat.com)
+- Use non-deprecated Tito properties. (awood@redhat.com)
+
+* Thu Jun 11 2015 Alex Wood <awood@redhat.com> 1.15.1-1
+- Move Python.h include to be first include (alikins@redhat.com)
+- 1092564: Provide LDFLAGS to setup.py to enable hardened build.
+  (awood@redhat.com)
+- Bump version to 1.15 (wpoteat@redhat.com)
+- Do not process proxy environment variables if host is in no_proxy
+  (martin.matuska@axelspringer.de)
+
 * Tue Jun 02 2015 William Poteat <wpoteat@redhat.com> 1.14.3-1
 - 1225600: Default config entry needs to include the substitution string
   (wpoteat@redhat.com)

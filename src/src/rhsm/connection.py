@@ -43,7 +43,7 @@ except ImportError:
     subman_version = "unknown"
 
 from rhsm import ourjson as json
-from rhsm.utils import get_env_proxy_info
+from rhsm import utils
 
 global_socket_timeout = 60
 timeout_altered = None
@@ -135,10 +135,16 @@ class BadCertificateException(ConnectionException):
 
 
 class RestlibException(ConnectionException):
+    """
+    Raised when a response with a valid json body is received along with a status code
+    that is not in [200, 202, 204, 410, 429]
+    See RestLib.validateResponse to see when this and other exceptions are raised.
+    """
 
-    def __init__(self, code, msg=None):
+    def __init__(self, code, msg=None, headers=None):
         self.code = code
         self.msg = msg or ""
+        self.headers = headers or {}
 
     def __str__(self):
         return self.msg
@@ -146,8 +152,15 @@ class RestlibException(ConnectionException):
 
 class GoneException(RestlibException):
     """
-    GoneException - used to detect when a consumer has been deleted on the
-    candlepin side.
+    GoneException is used to detect when a consumer has been deleted on the candlepin side.
+
+    A client handling a GoneException should verify that GoneException.deleted_id
+    matches the consumer uuid before taking any action (like deleting the consumer
+    cert from disk).
+
+    This is to prevent an errant 410 response from candlepin (or a reverse_proxy in
+    front of it, or it's app server, or an injected response) from causing
+    accidental consumer cert deletion.
     """
     def __init__(self, code, msg, deleted_id):
         # Exception doesn't inherit from object on el5 python version
@@ -156,6 +169,11 @@ class GoneException(RestlibException):
 
 
 class NetworkException(ConnectionException):
+    """
+    Thrown when the response of a request has no valid json content
+    and the http status code is anything other than the following:
+    [200, 202, 204, 401, 403, 410, 429, 500, 502, 503, 504]
+    """
 
     def __init__(self, code):
         self.code = code
@@ -165,7 +183,10 @@ class NetworkException(ConnectionException):
 
 
 class RemoteServerException(ConnectionException):
-
+    """
+    Thrown when the response to a request has no valid json content and
+    one of these http status codes: [404, 410, 500, 502, 503, 504]
+    """
     def __init__(self, code,
                  request_type=None,
                  handler=None):
@@ -191,11 +212,34 @@ class AuthenticationException(RemoteServerException):
         return buf
 
 
+class RateLimitExceededException(RestlibException):
+    """
+    Thrown in response to a http code 429.
+    This means that too many requests have been made in a given time period.
+    The retry_after attribute is an int of seconds to retry the request after.
+    The retry_after attribute may not be included in the response.
+    """
+    def __init__(self, code,
+                 msg=None,
+                 headers=None):
+        super(RateLimitExceededException, self).__init__(code,
+                                                         msg)
+        self.headers = headers or {}
+        self.msg = msg or ""
+        self.retry_after = safe_int(self.headers.get('Retry-After'))
+
+
 class UnauthorizedException(AuthenticationException):
+    """
+    Thrown in response to http status code 401 with no valid json content
+    """
     prefix = "Unauthorized"
 
 
 class ForbiddenException(AuthenticationException):
+    """
+    Thrown in response to http status code 403 with no valid json content
+    """
     prefix = "Forbidden"
 
 
@@ -264,17 +308,26 @@ class ContentConnection(object):
         self.username = username
         self.password = password
         self.ssl_verify_depth = ssl_verify_depth
-
         self.timeout_altered = False
 
         # get the proxy information from the environment variable
-        # if available
-        info = get_env_proxy_info()
+        # if available and host is not in no_proxy
+        if urllib.proxy_bypass_environment(self.host):
+            info = {'proxy_username': '',
+                   'proxy_hostname': '',
+                   'proxy_port': '',
+                   'proxy_password': ''}
+        else:
+            info = utils.get_env_proxy_info()
 
         self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
         self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
         self.proxy_user = proxy_user or config.get('server', 'proxy_user') or info['proxy_username']
         self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
+
+    @property
+    def user_agent(self):
+        return "RHSM-content/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
 
     def _request(self, request_type, handler, body=None):
         # See note in Restlib._request
@@ -298,11 +351,16 @@ class ContentConnection(object):
 
         set_default_socket_timeout_if_python_2_3()
 
-        conn.request("GET", handler, body="", headers={"Host": "%s:%s" % (self.host, self.ssl_port), "Content-Length": "0"})
+        conn.request("GET", handler,
+                     body="",
+                     headers={"Host": "%s:%s" % (self.host, self.ssl_port),
+                              "Content-Length": "0",
+                              "User-Agent": self.user_agent})
         response = conn.getresponse()
         result = {
             "content": response.read(),
-            "status": response.status}
+            "status": response.status,
+            "headers": dict(response.getheaders())}
 
         return result
 
@@ -365,6 +423,8 @@ def _get_locale():
 class Restlib(object):
     """
      A wrapper around httplib to make rest calls easier
+     See validateResponse() to learn when exceptions are raised as a result
+     of communication with the server.
     """
     def __init__(self, host, ssl_port, apihandler,
             username=None, password=None,
@@ -376,6 +436,9 @@ class Restlib(object):
         self.ssl_port = ssl_port
         self.apihandler = apihandler
         lc = _get_locale()
+
+        # Default, updated by UepConnection
+        self.user_agent = "python-rhsm-user-agent"
 
         self.headers = {"Content-type": "application/json",
                         "Accept": "application/json",
@@ -493,6 +556,9 @@ class Restlib(object):
 
         log.debug("Making request: %s %s" % (request_type, handler))
 
+        if self.user_agent:
+            self.headers['User-Agent'] = self.user_agent
+
         headers = self.headers
         if body is None:
             headers = dict(self.headers.items() +
@@ -513,7 +579,9 @@ class Restlib(object):
         result = {
             "content": response.read(),
             "status": response.status,
+            "headers": dict(response.getheaders())
         }
+
         response_log = 'Response: status=' + str(result['status'])
         if response.getheader('x-candlepin-request-uuid'):
             response_log = "%s, requestUuid=%s" % (response_log,
@@ -538,7 +606,7 @@ class Restlib(object):
     def validateResponse(self, response, request_type=None, handler=None):
 
         # FIXME: what are we supposed to do with a 204?
-        if str(response['status']) not in ["200", "204"]:
+        if str(response['status']) not in ["200", "202", "204"]:
             parsed = {}
             if not response.get('content'):
                 parsed = {}
@@ -554,22 +622,30 @@ class Restlib(object):
                     log.exception(e)
 
             if parsed:
-                # find and raise a GoneException on '410' with 'deleteId' in the
-                # content, implying that the resource has been deleted
+                # Find and raise a GoneException on '410' with 'deletedId' in the
+                # content, implying that the resource has been deleted.
+
                 # NOTE: a 410 with a unparseable content will raise
-                # RemoteServerException
+                # RemoteServerException and will not cause the client
+                # to delete the consumer cert.
                 if str(response['status']) == "410":
                     raise GoneException(response['status'],
-                        parsed['displayMessage'], parsed['deletedId'])
+                                        parsed['displayMessage'],
+                                        parsed['deletedId'])
 
                 # I guess this is where we would have an exception mapper if we
                 # had more meaningful exceptions. We've gotten a response from
                 # the server that means something.
 
+                error_msg = self._parse_msg_from_error_response_body(parsed)
+                if str(response['status']) in ['429']:
+                    raise RateLimitExceededException(response['status'],
+                                                     error_msg,
+                                                     headers=response.get('headers'))
+
                 # FIXME: we can get here with a valid json response that
                 # could be anything, we don't verify it anymore
-                error_msg = self._parse_msg_from_error_response_body(parsed)
-                raise RestlibException(response['status'], error_msg)
+                raise RestlibException(response['status'], error_msg, response.get('headers'))
             else:
                 # This really needs an exception mapper too...
                 if str(response['status']) in ["404", "410", "500", "502", "503", "504"]:
@@ -584,6 +660,9 @@ class Restlib(object):
                     raise ForbiddenException(response['status'],
                                              request_type=request_type,
                                              handler=handler)
+                elif str(response['status']) in ['429']:
+                    raise RateLimitExceededException(response['status'])
+
                 else:
                     # unexpected with no valid content
                     raise NetworkException(response['status'])
@@ -651,8 +730,14 @@ class UEPConnection:
         self.handler = self.handler.rstrip("/")
 
         # get the proxy information from the environment variable
-        # if available
-        info = get_env_proxy_info()
+        # if available and host is not in no_proxy
+        if urllib.proxy_bypass_environment(self.host):
+            info = {'proxy_username': '',
+                   'proxy_hostname': '',
+                   'proxy_port': '',
+                   'proxy_password': ''}
+        else:
+            info = utils.get_env_proxy_info()
 
         self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
         self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
@@ -718,7 +803,10 @@ class UEPConnection:
                     ssl_verify_depth=self.ssl_verify_depth)
             auth_description = "auth=none"
 
+        self.conn.user_agent = "RHSM/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
+
         self.resources = None
+        self.capabilities = None
         connection_description = ""
         if proxy_description:
             connection_description += proxy_description
@@ -753,6 +841,32 @@ class UEPConnection:
             self._load_supported_resources()
 
         return resource_name in self.resources
+
+    def _load_manager_capabilities(self):
+        """
+        Loads manager capabilities by doing a GET on the status
+        resource located at '/status'
+        """
+        status = self.getStatus()
+        capabilities = status.get('managerCapabilities')
+        if capabilities is None:
+            log.debug("The status retrieved did not \
+                      include key 'managerCapabilities'.\nStatus:'%s'" % status)
+            capabilities = []
+        elif isinstance(capabilities, list) and not capabilities:
+            log.debug("The managerCapabilities list \
+                      was empty\nStatus:'%s'" % status)
+        else:
+            log.debug("Server has the following capabilities: %s", capabilities)
+        return capabilities
+
+    def has_capability(self, capability):
+        """
+        Check if the server we're connected to has a particular capability.
+        """
+        if self.capabilities is None:
+            self.capabilities = self._load_manager_capabilities()
+        return capability in self.capabilities
 
     def shutDown(self):
         self.conn.close()
@@ -798,21 +912,39 @@ class UEPConnection:
 
         return self.conn.request_post(url, params)
 
-    def hypervisorCheckIn(self, owner, env, host_guest_mapping):
+    def hypervisorCheckIn(self, owner, env, host_guest_mapping, options=None):
         """
         Sends a mapping of hostIds to list of guestIds to candlepin
         to be registered/updated.
+        This method can raise the following exceptions:
+            - RestLibException with http code 400: this means no mapping
+            (or a bad one) was provided.
+            - RestLibException with other http codes: Please see the
+            definition of RestLibException above for info about this.
+            - RateLimitExceededException: This means that too many requests
+            have been made in the given time period.
 
-        host_guest_mapping is as follows:
-
-        {
-            'host-id-1': ['guest-id-1', 'guest-id-2'],
-            'host-id-2': ['guest-id-3', 'guest-id-4']
-        }
         """
-        query_params = urlencode({"owner": owner, "env": env})
-        url = "/hypervisors?%s" % (query_params)
-        return self.conn.request_post(url, host_guest_mapping)
+        if (self.has_capability("hypervisors_async")):
+            priorContentType = self.conn.headers['Content-type']
+            self.conn.headers['Content-type'] = 'text/plain'
+
+            params = {"env": env, "cloaked": False}
+            if options and options.reporter_id and len(options.reporter_id) > 0:
+                params['reporter_id'] = options.reporter_id
+
+            query_params = urlencode(params)
+            url = "/hypervisors/%s?%s" % (owner, query_params)
+            res = self.conn.request_post(url, host_guest_mapping)
+            self.conn.headers['Content-type'] = priorContentType
+        else:
+            # fall back to original report api
+            # this results in the same json as in the result_data field
+            # of the new api method
+            query_params = urlencode({"owner": owner, "env": env})
+            url = "/hypervisors?%s" % (query_params)
+            res = self.conn.request_post(url, host_guest_mapping)
+        return res
 
     def updateConsumerFacts(self, consumer_uuid, facts={}):
         """
@@ -831,6 +963,11 @@ class UEPConnection:
 
         Note that installed_products and guest_uuids expects a certain format,
         example parsing is in subscription-manager's format_for_server() method.
+
+        This can raise the following exceptions:
+            - RestlibException - This will include an http error code and a
+            translated message that provides some detail as to what happend.
+            - GoneException - This indicates that the consumer has been deleted
         """
         params = {}
         if installed_products is not None:
@@ -1060,6 +1197,10 @@ class UEPConnection:
         method = "/consumers/%s/certificates/%s" % (self.sanitize(consumerId), self.sanitize(str(serial)))
         return self.conn.request_delete(method)
 
+    def unbindByPoolId(self, consumer_uuid, pool_id):
+        method = "/consumers/%s/entitlements/pool/%s" % (self.sanitize(consumer_uuid), self.sanitize(pool_id))
+        return self.conn.request_delete(method)
+
     def unbindAll(self, consumerId):
         method = "/consumers/%s/entitlements" % self.sanitize(consumerId)
         return self.conn.request_delete(method)
@@ -1236,6 +1377,24 @@ class UEPConnection:
         List the subscriptions for a particular owner.
         """
         method = "/owners/%s/subscriptions" % self.sanitize(owner_key)
+        results = self.conn.request_get(method)
+        return results
+
+    def getJob(self, job_id):
+        """
+        Returns the status of a candlepin job.
+        """
+        query_params = urlencode({"result_data": True})
+        method = "/jobs/%s?%s" % (job_id, query_params)
+        results = self.conn.request_get(method)
+        return results
+
+    def updateJobStatus(self, job_status):
+        """
+        Given a dict representing a candlepin JobStatus, check it's status.
+        """
+        # let key error bubble up
+        method = job_status['statusPath']
         results = self.conn.request_get(method)
         return results
 

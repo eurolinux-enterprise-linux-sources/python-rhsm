@@ -47,6 +47,7 @@ consumerCertDir = /etc/pki/consumer
 report_package_profile = 1
 pluginDir = /usr/lib/rhsm-plugins
 some_option = %(repo_ca_cert)stest
+manage_repos =
 
 [rhsmcertd]
 certCheckInterval = 245
@@ -276,7 +277,7 @@ class ConfigTests(BaseConfigTests):
         self.assertFalse(value)
 
     def test_is_default_true(self):
-        value = self.cfgParser.is_default('server', 'hostname', 'subscription.rhn.redhat.com')
+        value = self.cfgParser.is_default('server', 'hostname', 'subscription.rhsm.redhat.com')
         self.assertTrue(value)
 
     def test_is_default_false(self):
@@ -336,6 +337,15 @@ class SomeOptionConfigTest(BaseConfigTests):
         value = self.cfgParser.get("rhsm", "some_option")
         self.assertEquals("/etc/rhsm/ca-test/redhat-uep-non-default.pemtest", value)
 
+class BlankWithDefaultConfigTest(BaseConfigTests):
+    cfgfile_data = TEST_CONFIG
+
+    def test_get_blank_config_file_entry(self):
+        default_returned = False
+        for (name, value) in self.cfgParser.items("rhsm"):
+            if name == "manage_repos":
+                default_returned = (value == "1")
+        self.assertTrue(default_returned)
 
 class OldConfigTests(ConfigTests):
     cfgfile_data = OLD_CONFIG
