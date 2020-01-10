@@ -10,7 +10,7 @@
 
 
 Name: python-rhsm
-Version: 1.12.5
+Version: 1.14.3
 Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
@@ -22,7 +22,7 @@ License: GPLv2
 # cd client/python-rhsm
 # tito build --tag python-rhsm-$VERSION-$RELEASE --tgz
 Source0: %{name}-%{version}.tar.gz
-URL: http://fedorahosted.org/candlepin
+URL: http://www.candlepinproject.org
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 Requires: m2crypto
@@ -47,7 +47,8 @@ entitlements, certificates, and access to content.
 %setup -q -n python-rhsm-%{version}
 
 %build
-%{__python} setup.py build
+# create a version.py with the rpm version info
+PYTHON_RHSM_VERSION=%{version} PYTHON_RHSM_RELEASE=%{release} %{__python} setup.py build
 
 %install
 rm -rf %{buildroot}
@@ -68,9 +69,55 @@ rm -rf %{buildroot}
 
 %{python_sitearch}/rhsm/*
 %{python_sitearch}/rhsm-*.egg-info
-%attr(640,root,root) %{_sysconfdir}/rhsm/ca/*.pem
+%attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
+* Tue Jun 02 2015 William Poteat <wpoteat@redhat.com> 1.14.3-1
+- 1225600: Default config entry needs to include the substitution string
+  (wpoteat@redhat.com)
+- Add F22 to Fedora branches. (awood@redhat.com)
+
+* Thu Feb 26 2015 Alex Wood <awood@redhat.com> 1.14.2-1
+- 1195446: Only set global socket timeout on RHEL 5. (alikins@redhat.com)
+- Cleanup up connection logging. (alikins@redhat.com)
+
+* Fri Feb 06 2015 Devan Goodwin <dgoodwin@rm-rf.ca> 1.14.1-1
+- 976855: build_py now populates version.py with ver (alikins@redhat.com)
+- 1187587: Correct project URL in spec file. (awood@redhat.com)
+* Fri Jan 09 2015 William Poteat <wpoteat@redhat.com> 1.13.10-1
+- Add custom JSON encoding for set objects. (awood@redhat.com)
+- Update SSL context options to follow the M2Crypto standard idiom.
+  (awood@redhat.com)
+
+* Wed Jan 07 2015 Devan Goodwin <dgoodwin@rm-rf.ca> 1.13.9-1
+- Allow clients to report product tags. (awood@redhat.com)
+
+* Fri Nov 21 2014 William Poteat <wpoteat@redhat.com> 1.13.8-1
+- 
+
+* Fri Nov 07 2014 Unknown name <wpoteat@redhat.com> 1.13.7-1
+- 
+
+* Thu Oct 23 2014 Alex Wood <awood@redhat.com> 1.13.6-1
+- 1153375: Support TLSv1.2 and v1.1 by default. (alikins@redhat.com)
+- Set CA PEM files permissions to 644. (awood@redhat.com)
+
+* Thu Oct 16 2014 Devan Goodwin <dgoodwin@rm-rf.ca> 1.13.5-1
+- Renamed the "containstext" parameter to "matches." (crog@redhat.com)
+
+* Thu Oct 16 2014 Devan Goodwin <dgoodwin@rm-rf.ca> 1.13.4-1
+- Added support for contains_text to UEPConnection.getPoolsList
+  (crog@redhat.com)
+
+* Fri Oct 03 2014 Alex Wood <awood@redhat.com> 1.13.3-1
+- Make more use of setup.py. (alikins@redhat.com)
+
+* Sun Sep 07 2014 Alex Wood <awood@redhat.com> 1.13.2-1
+- Remove a 2.6ism that slipped in. (awood@redhat.com)
+
+* Thu Sep 04 2014 Alex Wood <awood@redhat.com> 1.13.1-1
+- version bump (jesusr@redhat.com)
+
 * Fri Jul 25 2014 jesus m. rodriguez <jesusr@redhat.com> 1.12.5-1
 - 1120431: Support for complex path matching. (bkearney@redhat.com)
 

@@ -58,7 +58,7 @@ SERVER_DEFAULTS = {
 RHSM_DEFAULTS = {
         'baseurl': 'https://' + DEFAULT_CDN_HOSTNAME,
         'ca_cert_dir': DEFAULT_CA_CERT_DIR,
-        'repo_ca_cert': DEFAULT_CA_CERT_DIR + 'redhat-uep.pem',
+        'repo_ca_cert': '%(ca_cert_dir)sredhat-uep.pem',
         'productcertdir': '/etc/pki/product',
         'entitlementcertdir': DEFAULT_ENT_CERT_DIR,
         'consumercertdir': '/etc/pki/consumer',
@@ -138,7 +138,7 @@ class RhsmConfigParser(SafeConfigParser):
                 return self.get(section, prop)
             # If nothing has been changed (we couldn't fix it) re-raise the exception
             raise
-        except (NoOptionError, NoSectionError) as er:
+        except (NoOptionError, NoSectionError), er:
             try:
                 return DEFAULTS[section][prop.lower()]
             except KeyError:

@@ -27,20 +27,51 @@ import urllib
 
 from M2Crypto import SSL, httpslib
 from M2Crypto.SSL import SSLError
+from M2Crypto import m2
+
 from urllib import urlencode
 
 from config import initConfig
-from version import Versions
+
+import version
+python_rhsm_version = version.rpm_version
+
+try:
+    import subscription_manager.version
+    subman_version = subscription_manager.version.rpm_version
+except ImportError:
+    subman_version = "unknown"
 
 from rhsm import ourjson as json
 from rhsm.utils import get_env_proxy_info
 
-# on EL5, there is a really long socket timeout. The
-# best thing we can do is set a process wide default socket timeout.
-# Limit this to affected python versions only, just to minimize any
-# problems the default timeout might cause.
-if sys.version_info[0] == 2 and sys.version_info[0] <= 4:
-    socket.setdefaulttimeout(60)
+global_socket_timeout = 60
+timeout_altered = None
+
+
+def set_default_socket_timeout_if_python_2_3():
+    """If using python 2.3 set a global socket default timeout.
+
+    On EL5/python2.3, there is a really long socket timeout. The
+    best thing we can do is set a process wide default socket timeout.
+    Limit this to affected python versions only, just to minimize any
+    problems the default timeout might cause.
+
+    Return True if we change it.
+    """
+
+    global timeout_altered
+
+    # once per module instance should be plenty
+    if timeout_altered:
+        return timeout_altered
+
+    if sys.version_info[0] == 2 and sys.version_info[1] < 4:
+        socket.setdefaulttimeout(global_socket_timeout)
+        timeout_altered = True
+        return
+
+    timeout_altered = False
 
 
 class NullHandler(logging.Handler):
@@ -234,6 +265,8 @@ class ContentConnection(object):
         self.password = password
         self.ssl_verify_depth = ssl_verify_depth
 
+        self.timeout_altered = False
+
         # get the proxy information from the environment variable
         # if available
         info = get_env_proxy_info()
@@ -244,7 +277,11 @@ class ContentConnection(object):
         self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
 
     def _request(self, request_type, handler, body=None):
-        context = SSL.Context("tlsv1")
+        # See note in Restlib._request
+        context = SSL.Context("sslv23")
+
+        # Disable SSLv2 and SSLv3 support to avoid poodles.
+        context.set_options(m2.SSL_OP_NO_SSLv2 | m2.SSL_OP_NO_SSLv3)
 
         self._load_ca_certificates(context)
 
@@ -258,6 +295,8 @@ class ContentConnection(object):
             handler = "https://%s:%s%s" % (self.host, self.ssl_port, handler)
         else:
             conn = httpslib.HTTPSConnection(self.host, safe_int(self.ssl_port), ssl_context=context)
+
+        set_default_socket_timeout_if_python_2_3()
 
         conn.request("GET", handler, body="", headers={"Host": "%s:%s" % (self.host, self.ssl_port), "Content-Length": "0"})
         response = conn.getresponse()
@@ -327,7 +366,6 @@ class Restlib(object):
     """
      A wrapper around httplib to make rest calls easier
     """
-
     def __init__(self, host, ssl_port, apihandler,
             username=None, password=None,
             proxy_hostname=None, proxy_port=None,
@@ -338,12 +376,6 @@ class Restlib(object):
         self.ssl_port = ssl_port
         self.apihandler = apihandler
         lc = _get_locale()
-        #collect some version data
-        v = Versions()
-        subman_version = ("%s-%s") % \
-            (v.get_version("subscription-manager"), v.get_release("subscription-manager"))
-        python_rhsm_version = ("%s-%s") % \
-            (v.get_version("python-rhsm"), v.get_release("python-rhsm"))
 
         self.headers = {"Content-type": "application/json",
                         "Accept": "application/json",
@@ -416,12 +448,28 @@ class Restlib(object):
     # FIXME: can method be emtpty?
     def _request(self, request_type, method, info=None):
         handler = self.apihandler + method
-        context = SSL.Context("tlsv1")
+
+        # See M2Crypto/SSL/Context.py in m2crypto source and
+        # https://www.openssl.org/docs/ssl/SSL_CTX_new.html
+        # This ends up invoking SSLv23_method, which is the catch all
+        # "be compatible" protocol, even though it explicitly is not
+        # using sslv2. This will by default potentially include sslv3
+        # if not used with post-poodle openssl. If however, the server
+        # intends to not offer sslv3, it's workable.
+        #
+        # So this supports tls1.2, 1.1, 1.0, and/or sslv3 if supported.
+        context = SSL.Context("sslv23")
+
+        # Disable SSLv2 and SSLv3 support to avoid poodles.
+        context.set_options(m2.SSL_OP_NO_SSLv2 | m2.SSL_OP_NO_SSLv3)
 
         if self.insecure:  # allow clients to work insecure mode if required..
             context.post_connection_check = NoOpChecker()
         else:
-            context.set_verify(SSL.verify_fail_if_no_peer_cert, self.ssl_verify_depth)
+            # Proper peer verification is essential to prevent MITM attacks.
+            context.set_verify(
+                    SSL.verify_peer | SSL.verify_fail_if_no_peer_cert,
+                    self.ssl_verify_depth)
             if self.ca_dir is not None:
                 self._load_ca_certificates(context)
         if self.cert_file and os.path.exists(self.cert_file):
@@ -439,7 +487,7 @@ class Restlib(object):
             conn = httpslib.HTTPSConnection(self.host, self.ssl_port, ssl_context=context)
 
         if info is not None:
-            body = json.dumps(info)
+            body = json.dumps(info, default=json.encode)
         else:
             body = None
 
@@ -449,6 +497,10 @@ class Restlib(object):
         if body is None:
             headers = dict(self.headers.items() +
                            {"Content-Length": "0"}.items())
+
+        # NOTE: alters global timeout_altered (and socket timeout)
+        set_default_socket_timeout_if_python_2_3()
+
         try:
             conn.request(request_type, handler, body=body, headers=headers)
         except SSLError:
@@ -637,6 +689,10 @@ class UEPConnection:
         #    raise Exception("Must specify either username/password or "
         #            "cert_file/key_file")
 
+        proxy_description = None
+        if self.proxy_hostname and self.proxy_port:
+            proxy_description = "http_proxy=%s:%s " % (self.proxy_hostname, self.proxy_port)
+        auth_description = None
         # initialize connection
         if using_basic_auth:
             self.conn = Restlib(self.host, self.ssl_port, self.handler,
@@ -645,7 +701,7 @@ class UEPConnection:
                     proxy_user=self.proxy_user, proxy_password=self.proxy_password,
                     ca_dir=self.ca_cert_dir, insecure=self.insecure,
                     ssl_verify_depth=self.ssl_verify_depth)
-            log.info("Using basic authentication as: %s" % username)
+            auth_description = "auth=basic username=%s" % username
         elif using_id_cert_auth:
             self.conn = Restlib(self.host, self.ssl_port, self.handler,
                                 cert_file=self.cert_file, key_file=self.key_file,
@@ -653,21 +709,22 @@ class UEPConnection:
                                 proxy_user=self.proxy_user, proxy_password=self.proxy_password,
                                 ca_dir=self.ca_cert_dir, insecure=self.insecure,
                                 ssl_verify_depth=self.ssl_verify_depth)
-            log.info("Using certificate authentication: key = %s, cert = %s, "
-                     "ca = %s, insecure = %s" %
-                     (self.key_file, self.cert_file, self.ca_cert_dir,
-                      self.insecure))
+            auth_description = "auth=identity_cert ca_dir=%s verify=%s" % (self.ca_cert_dir, self.insecure)
         else:
             self.conn = Restlib(self.host, self.ssl_port, self.handler,
                     proxy_hostname=self.proxy_hostname, proxy_port=self.proxy_port,
                     proxy_user=self.proxy_user, proxy_password=self.proxy_password,
                     ca_dir=self.ca_cert_dir, insecure=self.insecure,
                     ssl_verify_depth=self.ssl_verify_depth)
-            log.info("Using no auth")
+            auth_description = "auth=none"
 
         self.resources = None
-        log.info("Connection Built: host: %s, port: %s, handler: %s" %
-                (self.host, self.ssl_port, self.handler))
+        connection_description = ""
+        if proxy_description:
+            connection_description += proxy_description
+        connection_description += "host=%s port=%s handler=%s %s" % (self.host, self.ssl_port,
+                                                                    self.handler, auth_description)
+        log.info("Connection built: %s", connection_description)
 
     def _load_supported_resources(self):
         """
@@ -683,8 +740,8 @@ class UEPConnection:
         resources_list = self.conn.request_get("/")
         for r in resources_list:
             self.resources[r['rel']] = r['href']
-        log.debug("Server supports the following resources:")
-        log.debug(self.resources)
+        log.debug("Server supports the following resources: %s",
+                  self.resources)
 
     def supports_resource(self, resource_name):
         """
@@ -706,7 +763,8 @@ class UEPConnection:
 
     def registerConsumer(self, name="unknown", type="system", facts={},
             owner=None, environment=None, keys=None,
-            installed_products=None, uuid=None, hypervisor_id=None):
+            installed_products=None, uuid=None, hypervisor_id=None,
+            content_tags=None):
         """
         Creates a consumer on candlepin server
         """
@@ -721,6 +779,9 @@ class UEPConnection:
 
         if hypervisor_id is not None:
             params['hypervisorId'] = {'hypervisorId': hypervisor_id}
+
+        if content_tags is not None:
+            params['contentTags'] = content_tags
 
         url = "/consumers"
         if environment:
@@ -761,7 +822,7 @@ class UEPConnection:
 
     def updateConsumer(self, uuid, facts=None, installed_products=None,
             guest_uuids=None, service_level=None, release=None,
-            autoheal=None, hypervisor_id=None):
+            autoheal=None, hypervisor_id=None, content_tags=None):
         """
         Update a consumer on the server.
 
@@ -784,6 +845,8 @@ class UEPConnection:
             params['autoheal'] = autoheal
         if hypervisor_id is not None:
             params['hypervisorId'] = {'hypervisorId': hypervisor_id}
+        if content_tags is not None:
+            params['contentTags'] = content_tags
 
         # The server will reject a service level that is not available
         # in the consumer's organization, so no need to check if it's safe
@@ -1010,7 +1073,7 @@ class UEPConnection:
 
         return self.conn.request_put(method)
 
-    def getPoolsList(self, consumer=None, listAll=False, active_on=None, owner=None):
+    def getPoolsList(self, consumer=None, listAll=False, active_on=None, owner=None, filter_string=None):
         """
         List pools for a given consumer or owner.
 
@@ -1036,6 +1099,8 @@ class UEPConnection:
         if active_on:
             method = "%s&activeon=%s" % (method,
                     self.sanitize(active_on.isoformat(), plus=True))
+        if filter_string:
+            method = "%s&matches=%s" % (method, self.sanitize(filter_string, plus=True))
         results = self.conn.request_get(method)
         return results
 
