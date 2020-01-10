@@ -15,7 +15,7 @@
 %{!?__global_ldflags: %global __global_ldflags -Wl,-z,relro -Wl,-z,now}
 
 Name: python-rhsm
-Version: 1.18.6
+Version: 1.18.7
 Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
@@ -102,6 +102,9 @@ rm -rf %{buildroot}
 %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
+* Mon Jun 05 2017 Kevin Howell <khowell@redhat.com> 1.18.7-1
+- 1435475: Support older versions of M2Crypto (awood@redhat.com)
+
 * Fri Dec 09 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.6-1
 - 1400719: Proxy host not available for release command (wpoteat@redhat.com)
 - 1397201: Expose classes in m2crypto wrapper (khowell@redhat.com)
