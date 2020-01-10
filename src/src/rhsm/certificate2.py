@@ -62,7 +62,11 @@ class _CertFactory(object):
         """
         Create appropriate certificate object from a PEM file on disk.
         """
-        pem = open(path, 'r').read()
+        try:
+            pem = open(path, 'r').read()
+        except IOError, e:
+            print(os.strerror(e.errno))
+            exit(1)
         return self._read_x509(_certificate.load(path), path, pem)
 
     def create_from_pem(self, pem, path=None):
@@ -81,7 +85,7 @@ class _CertFactory(object):
             extensions = _Extensions2(x509)
             redhat_oid = OID(REDHAT_OID_NAMESPACE)
             # Trim down to only the extensions in the Red Hat namespace:
-            extensions = extensions.ltrim(len(redhat_oid))
+            extensions = extensions.branch(redhat_oid)
             # Check the certificate version, absence of the extension implies v1.0:
             cert_version_str = "1.0"
             if EXT_CERT_VERSION in extensions:
@@ -410,7 +414,7 @@ class Certificate(object):
     def __init__(self, x509=None, path=None, version=None, serial=None, start=None,
             end=None, subject=None, pem=None, issuer=None):
 
-        # The X509 M2crypto object for this certificate.
+        # The rhsm._certificate X509 object for this certificate.
         # WARNING: May be None in tests
         self.x509 = x509
 

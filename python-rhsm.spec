@@ -8,11 +8,14 @@
 # simplejson is not available in RHEL 7 at all.
 %global use_simplejson (0%{?rhel} && 0%{?rhel} == 5)
 
+# on non-EOL Fedora and RHEL 7, let's not use m2crypto
+%global use_m2crypto (0%{?fedora} < 23 && 0%{?rhel} < 7)
+
 %global _hardened_build 1
 %{!?__global_ldflags: %global __global_ldflags -Wl,-z,relro -Wl,-z,now}
 
 Name: python-rhsm
-Version: 1.16.6
+Version: 1.18.6
 Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
@@ -27,15 +30,26 @@ Source0: %{name}-%{version}.tar.gz
 URL: http://www.candlepinproject.org
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
+%if %use_m2crypto
+%if 0%{?sles_version}
+Requires: python-m2crypto
+%else
 Requires: m2crypto
+%endif
+%endif
 Requires: python-iniparse
 Requires: rpm-python
 Requires: python-dateutil
 %if %use_simplejson
 Requires: python-simplejson
 %endif
+Requires: python-rhsm-certificates = %{version}-%{release}
 
+%if 0%{?sles_version}
+BuildRequires: python-devel >= 2.6
+%else
 BuildRequires: python2-devel
+%endif
 BuildRequires: python-setuptools
 BuildRequires: openssl-devel
 
@@ -44,6 +58,17 @@ BuildRequires: openssl-devel
 A small library for communicating with the REST interface of a Red Hat Unified
 Entitlement Platform. This interface is used for the management of system
 entitlements, certificates, and access to content.
+
+
+%package certificates
+Summary: Certificates required to communicate with a Red Hat Unified Entitlement Platform
+Group: Development/Libraries
+
+%description certificates
+This package contains certificates required for communicating with the REST interface
+of a Red Hat Unified Entitlement Platform, used for the management of system entitlements
+and to receive access to content. Please note this package does not have a dependency on
+Python. The name instead reflects its relationship to python-rhsm.
 
 %prep
 %setup -q -n python-rhsm-%{version}
@@ -66,14 +91,82 @@ rm -rf %{buildroot}
 %doc README
 
 %dir %{python_sitearch}/rhsm
-%attr(755,root,root) %dir %{_sysconfdir}/rhsm
-%attr(755,root,root) %dir %{_sysconfdir}/rhsm/ca
 
 %{python_sitearch}/rhsm/*
 %{python_sitearch}/rhsm-*.egg-info
+
+%files certificates
+%attr(755,root,root) %dir %{_sysconfdir}/rhsm
+%attr(755,root,root) %dir %{_sysconfdir}/rhsm/ca
+
 %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
+* Fri Dec 09 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.6-1
+- 1400719: Proxy host not available for release command (wpoteat@redhat.com)
+- 1397201: Expose classes in m2crypto wrapper (khowell@redhat.com)
+
+* Fri Nov 25 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.5-1
+- 1396405: Use an int for port on connections (csnyder@redhat.com)
+- 1393010: Correlate request ID, method and handler in logs
+  (csnyder@redhat.com)
+- 1394776: Fix port, insecure, and handler options on M2Crypto wrapper
+  (csnyder@redhat.com)
+- 1394351: Add httplib constants to m2cryptohttp (khowell@redhat.com)
+- 1390688: Add missing socket import (khowell@redhat.com)
+- Reduce usage of m2crypto (#184) (kevin@kahowell.net)
+
+* Sun Oct 16 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.4-1
+- Added 6.9 releaser (adarshvritant@gmail.com)
+
+* Sun Oct 16 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.3-1
+- 1320371: Fix case of retry-after header handling (khowell@redhat.com)
+- Fedora 22 is end-of-life. (awood@redhat.com)
+- 1311429: Honor no_proxy environment variable (khowell@redhat.com)
+
+* Fri Sep 16 2016 Alex Wood <awood@redhat.com> 1.18.2-1
+- 1176219: Raise ProxyException in Restlib (khowell@redhat.com)
+- 1367243: Handle RestlibException 404 in refresh (khowell@redhat.com)
+- 1367243: Fix 404 check in regen entitlement funcs (khowell@redhat.com)
+- Revert "1367243: Fix 404 check in regen entitlement funcs"
+  (khowell@redhat.com)
+- 1367243: Fix 404 check in regen entitlement funcs (khowell@redhat.com)
+- Ensure both cert regen methods succeed despite BadStatusLine from server
+  (csnyder@redhat.com)
+- Update fix to include BadStatusLine responses from the server
+  (csnyder@redhat.com)
+- 1366301: Entitlement regeneration no longer propagates server errors
+  (crog@redhat.com)
+- 1365280: Update default_log_level to INFO (csnyder@redhat.com)
+- 1334916: Add rhsm.conf logging section defaults (csnyder@redhat.com)
+- 1360909: Added functionality for regenerating entitlement certificates
+  (crog@redhat.com)
+- 1315901: Exception handling for PEM cert read (wpoteat@redhat.com)
+
+* Fri Jul 15 2016 Alex Wood <awood@redhat.com> 1.18.1-1
+- Bump version to 1.18 (vrjain@redhat.com)
+
+* Thu Jun 30 2016 Vritant Jain <vrjain@redhat.com> 1.17.5-1
+- 1104332: Separate out the rhsm certs into a separate RPM (vrjain@redhat.com)
+
+* Tue Jun 21 2016 Vritant Jain <vrjain@redhat.com> 1.17.4-1
+- 1346417: Allow users to set socket timeout. (awood@redhat.com)
+- Fix Flake8 Errors (bcourt@redhat.com)
+- Add Fedora 24 to the branch list. (awood@redhat.com)
+- Added basic SLES compatibilty. Tested against SLES 11 SP3
+  (darinlively@gmail.com)
+
+* Thu May 12 2016 Darin Lively <darinlively@gmail.com> 1.17.3-0
+- Added basic SLES build compatibilty
+
+* Mon Apr 25 2016 Vritant Jain <vrjain@redhat.com> 1.17.2-1
+- Added 7.3 releaser (vrjain@redhat.com)
+- Updated UEPConnection.getProduct to explicitly reference product UUID
+  (crog@redhat.com)
+
+* Mon Feb 01 2016 Christopher Snyder <csnyder@redhat.com> 1.17.1-1
+- Bump version to 1.17.0 (csnyder@redhat.com)
+
 * Tue Jan 19 2016 Christopher Snyder <csnyder@redhat.com> 1.16.6-1
 - 1297337: change server strings to new default (wpoteat@redhat.com)
 
