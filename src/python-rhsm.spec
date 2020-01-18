@@ -8,11 +8,14 @@
 # simplejson is not available in RHEL 7 at all.
 %global use_simplejson (0%{?rhel} && 0%{?rhel} == 5)
 
+# on non-EOL Fedora and RHEL 7, let's not use m2crypto
+%global use_m2crypto (0%{?fedora} < 23 && 0%{?rhel} < 7)
+
 %global _hardened_build 1
 %{!?__global_ldflags: %global __global_ldflags -Wl,-z,relro -Wl,-z,now}
 
 Name: python-rhsm
-Version: 1.17.9
+Version: 1.19.10
 Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
@@ -27,10 +30,12 @@ Source0: %{name}-%{version}.tar.gz
 URL: http://www.candlepinproject.org
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
+%if %use_m2crypto
 %if 0%{?sles_version}
 Requires: python-m2crypto
 %else
 Requires: m2crypto
+%endif
 %endif
 Requires: python-iniparse
 Requires: rpm-python
@@ -97,22 +102,95 @@ rm -rf %{buildroot}
 %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
-* Wed Sep 07 2016 Christopher Snyder <csnyder@redhat.com> 1.17.9-1
+* Fri Sep 01 2017 Kevin Howell <khowell@redhat.com> 1.19.10-1
+- 1481384: Do not update redhat.repo at RateLimitExceededException
+  (jhnidek@redhat.com)
+
+* Wed Jun 07 2017 Kevin Howell <khowell@redhat.com> 1.19.9-1
+- 1444453: Have gettext return unicode instead of bytes. (awood@redhat.com)
+- 1457197: Env. variable no_proxy=* is not ignored (jhnidek@redhat.com)
+
+* Tue May 30 2017 Kevin Howell <khowell@redhat.com> 1.19.8-1
+- 1443164: no_proxy match the host name when *.redhat.com is used
+  (jhnidek@redhat.com)
+
+* Wed May 24 2017 Kevin Howell <khowell@redhat.com> 1.19.7-1
+- 1443159: Added default value for splay configuration (jhnidek@redhat.com)
+- 1451166: Fix Host header when using proxy (khowell@redhat.com)
+
+* Tue May 02 2017 Kevin Howell <khowell@redhat.com> 1.19.6-1
+- 1426343: fixed rct to display cert without subjectAltName.
+  (jhnidek@redhat.com)
+- Add Update subscriptions pools (tcoufal@redhat.com)
+- Add support to list future subscription pools (tcoufal@redhat.com)
+
+* Mon Apr 17 2017 Kevin Howell <khowell@redhat.com> 1.19.5-1
+- 1432990: Better message for bad CA cert (wpoteat@redhat.com)
+
+* Mon Apr 10 2017 Kevin Howell <khowell@redhat.com> 1.19.4-1
+- 1438552: Allows releases to be listed through a proxy (csnyder@redhat.com)
+- 1420533: Add no_proxy option to API, config, UI (khowell@redhat.com)
+
+* Fri Mar 31 2017 Kevin Howell <khowell@redhat.com> 1.19.3-1
+- 1435475: Support older versions of M2Crypto (awood@redhat.com)
+- 1427069: Prioritize content from Basic entitlements (khowell@redhat.com)
+
+* Mon Mar 13 2017 Kevin Howell <khowell@redhat.com> 1.19.2-1
+- 1423443: Handle IndexError during m2crypto request (khowell@redhat.com)
+- Move python-rhsm into subdirectory (khowell@redhat.com)
+
+* Wed Jan 25 2017 Alex Wood <awood@redhat.com> 1.19.1-1
+- Adjust our C bindings for OpenSSL v1.1 API. (awood@redhat.com)
+- Make python-rhsm Python-3 compatible (khowell@redhat.com)
+
+* Thu Jan 19 2017 Alex Wood <awood@redhat.com> 1.19.0-1
+- Bump version to 1.19 (adarshvritant@gmail.com)
+- Adds new super class BaseRhsmLib that exposes request results.
+  (awood@redhat.com)
+
+* Fri Dec 09 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.6-1
+- 1400719: Proxy host not available for release command (wpoteat@redhat.com)
+- 1397201: Expose classes in m2crypto wrapper (khowell@redhat.com)
+
+* Fri Nov 25 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.5-1
+- 1396405: Use an int for port on connections (csnyder@redhat.com)
+- 1393010: Correlate request ID, method and handler in logs
+  (csnyder@redhat.com)
+- 1394776: Fix port, insecure, and handler options on M2Crypto wrapper
+  (csnyder@redhat.com)
+- 1394351: Add httplib constants to m2cryptohttp (khowell@redhat.com)
+- 1390688: Add missing socket import (khowell@redhat.com)
+- Reduce usage of m2crypto (#184) (kevin@kahowell.net)
+
+* Sun Oct 16 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.4-1
+- Added 6.9 releaser (adarshvritant@gmail.com)
+
+* Sun Oct 16 2016 Vritant Jain <adarshvritant@gmail.com> 1.18.3-1
+- 1320371: Fix case of retry-after header handling (khowell@redhat.com)
+- Fedora 22 is end-of-life. (awood@redhat.com)
+- 1311429: Honor no_proxy environment variable (khowell@redhat.com)
+
+* Fri Sep 16 2016 Alex Wood <awood@redhat.com> 1.18.2-1
+- 1176219: Raise ProxyException in Restlib (khowell@redhat.com)
 - 1367243: Handle RestlibException 404 in refresh (khowell@redhat.com)
-
-* Wed Sep 07 2016 Christopher Snyder <csnyder@redhat.com> 1.17.8-1
 - 1367243: Fix 404 check in regen entitlement funcs (khowell@redhat.com)
-
-* Fri Aug 26 2016 Vritant Jain <vrjain@redhat.com> 1.17.7-1
+- Revert "1367243: Fix 404 check in regen entitlement funcs"
+  (khowell@redhat.com)
+- 1367243: Fix 404 check in regen entitlement funcs (khowell@redhat.com)
+- Ensure both cert regen methods succeed despite BadStatusLine from server
+  (csnyder@redhat.com)
+- Update fix to include BadStatusLine responses from the server
+  (csnyder@redhat.com)
 - 1366301: Entitlement regeneration no longer propagates server errors
   (crog@redhat.com)
 - 1365280: Update default_log_level to INFO (csnyder@redhat.com)
-
-* Tue Aug 09 2016 Vritant Jain <vrjain@redhat.com> 1.17.6-1
-- 1315901: Exception handling for PEM cert read (wpoteat@redhat.com)
 - 1334916: Add rhsm.conf logging section defaults (csnyder@redhat.com)
 - 1360909: Added functionality for regenerating entitlement certificates
   (crog@redhat.com)
+- 1315901: Exception handling for PEM cert read (wpoteat@redhat.com)
+
+* Fri Jul 15 2016 Alex Wood <awood@redhat.com> 1.18.1-1
+- Bump version to 1.18 (vrjain@redhat.com)
 
 * Thu Jun 30 2016 Vritant Jain <vrjain@redhat.com> 1.17.5-1
 - 1104332: Separate out the rhsm certs into a separate RPM (vrjain@redhat.com)

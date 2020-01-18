@@ -45,6 +45,7 @@
 
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
+#include <openssl/opensslv.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
@@ -53,16 +54,43 @@
 
 #define MAX_BUF 256
 
+/* Python 2/3 compatiblity defines */
+#if PY_MAJOR_VERSION >= 3
+#define PyString_FromStringAndSize(value, length) \
+	PyUnicode_FromStringAndSize(value, length);
+#define PyString_FromString(value) \
+	PyUnicode_FromString(value);
+#endif
+
+/* OpenSSL pre version 1.1 compatibility defines */
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+	#define X509_EXTENSION_get_data(o) ((o)->value)
+	#define X509_EXTENSION_get_object(o) ((o)->object)
+	#define ASN1_STRING_get0_data(o) ASN1_STRING_data(o)
+#endif
+
 typedef struct {
 	PyObject_HEAD;
 	X509 *x509;
 } certificate_x509;
 
+typedef struct {
+	PyObject_HEAD;
+	EVP_PKEY *key;
+} private_key;
+
 static void
 certificate_x509_dealloc (certificate_x509 *self)
 {
 	X509_free (self->x509);
-	self->ob_type->tp_free ((PyObject *) self);
+	Py_TYPE(self)->tp_free ((PyObject *) self);
+}
+
+static void
+private_key_dealloc (private_key *self)
+{
+	EVP_PKEY_free (self->key);
+	Py_TYPE(self)->tp_free ((PyObject *) self);
 }
 
 static PyObject *get_not_before (certificate_x509 *self, PyObject *varargs);
@@ -74,6 +102,7 @@ static PyObject *get_extension (certificate_x509 *self, PyObject *varargs,
 				PyObject *keywords);
 static PyObject *get_all_extensions (certificate_x509 *self, PyObject *varargs);
 static PyObject *as_pem (certificate_x509 *self, PyObject *varargs);
+static PyObject *as_text (certificate_x509 *self, PyObject *varargs);
 
 static PyMethodDef x509_methods[] = {
 	{"get_not_before", (PyCFunction) get_not_before, METH_VARARGS,
@@ -93,12 +122,13 @@ static PyMethodDef x509_methods[] = {
 	 "get a dict of oid: value"},
 	{"as_pem", (PyCFunction) as_pem, METH_VARARGS,
 	 "return the pem representation of this certificate"},
+	{"as_text", (PyCFunction) as_text, METH_VARARGS,
+	 "return the text representation of this certificate (such as printed by openssl x509 -noout -text)"},
 	{NULL}
 };
 
 static PyTypeObject certificate_x509_type = {
-	PyObject_HEAD_INIT (NULL)
-	0,
+	PyVarObject_HEAD_INIT (NULL, 0)
 	"_certificate.X509",
 	sizeof (certificate_x509),
 	0,			/*tp_itemsize */
@@ -138,6 +168,47 @@ static PyTypeObject certificate_x509_type = {
 	0,			/* tp_new */
 };
 
+static PyTypeObject private_key_type = {
+	PyVarObject_HEAD_INIT (NULL, 0)
+	"_certificate.PrivateKey",
+	sizeof (private_key),
+	0,			/*tp_itemsize */
+	(destructor) private_key_dealloc,
+	0,			/*tp_print */
+	0,			/*tp_getattr */
+	0,			/*tp_setattr */
+	0,			/*tp_compare */
+	0,			/*tp_repr */
+	0,			/*tp_as_number */
+	0,			/*tp_as_sequence */
+	0,			/*tp_as_mapping */
+	0,			/*tp_hash */
+	0,			/*tp_call */
+	0,			/*tp_str */
+	0,			/*tp_getattro */
+	0,			/*tp_setattro */
+	0,			/*tp_as_buffer */
+	Py_TPFLAGS_DEFAULT,	/*tp_flags */
+	"Private Key",	    /* tp_doc */
+	0,			/* tp_traverse */
+	0,			/* tp_clear */
+	0,			/* tp_richcompare */
+	0,			/* tp_weaklistoffset */
+	0,			/* tp_iter */
+	0,			/* tp_iternext */
+	0,			/* tp_methods */
+	0,			/* tp_members */
+	0,			/* tp_getset */
+	0,			/* tp_base */
+	0,			/* tp_dict */
+	0,			/* tp_descr_get */
+	0,			/* tp_descr_set */
+	0,			/* tp_dictoffset */
+	0,			/* tp_init */
+	0,			/* tp_alloc */
+	0,			/* tp_new */
+};
+
 static size_t
 get_extension_by_object (X509 *x509, ASN1_OBJECT *obj, char **output)
 {
@@ -150,20 +221,20 @@ get_extension_by_object (X509 *x509, ASN1_OBJECT *obj, char **output)
 	int tag;
 	long len;
 	int tc;
-	const unsigned char *p = ext->value->data;
+	const unsigned char *p = X509_EXTENSION_get_data(ext)->data;
 
-	ASN1_get_object (&p, &len, &tag, &tc, ext->value->length);
+	ASN1_get_object (&p, &len, &tag, &tc, X509_EXTENSION_get_data(ext)->length);
 
 	size_t size;
 	switch (tag) {
 		case V_ASN1_UTF8STRING:
 			{
 				ASN1_UTF8STRING *str =
-					ASN1_item_unpack (ext->value,
+					ASN1_item_unpack (X509_EXTENSION_get_data(ext),
 							  ASN1_ITEM_rptr
 							  (ASN1_UTF8STRING));
 				*output = strndup ((const char *)
-						   ASN1_STRING_data (str),
+						   ASN1_STRING_get0_data (str),
 						   str->length);
 				size = str->length;
 				ASN1_UTF8STRING_free (str);
@@ -172,7 +243,7 @@ get_extension_by_object (X509 *x509, ASN1_OBJECT *obj, char **output)
 		case V_ASN1_OCTET_STRING:
 			{
 				ASN1_OCTET_STRING *octstr =
-					ASN1_item_unpack (ext->value,
+					ASN1_item_unpack (X509_EXTENSION_get_data(ext),
 							  ASN1_ITEM_rptr
 							  (ASN1_OCTET_STRING));
 				*output = malloc (octstr->length);
@@ -244,6 +315,40 @@ load_cert (PyObject *self, PyObject *args, PyObject *keywords)
 }
 
 static PyObject *
+load_private_key (PyObject *self, PyObject *args, PyObject *keywords)
+{
+	const char *file_name = NULL;
+	const char *pem = NULL;
+
+	static char *keywordlist[] = { "file", "pem", NULL };
+
+	if (!PyArg_ParseTupleAndKeywords (args, keywords, "|ss", keywordlist,
+					  &file_name, &pem)) {
+		return NULL;
+	}
+
+	BIO *bio;
+	if (pem != NULL) {
+		bio = BIO_new_mem_buf ((void *) pem, strlen (pem));
+	} else {
+		bio = BIO_new_file (file_name, "r");
+	}
+
+	EVP_PKEY* key = PEM_read_bio_PrivateKey (bio, NULL, NULL, NULL);
+	BIO_free (bio);
+
+	if (key == NULL) {
+		Py_INCREF (Py_None);
+		return Py_None;
+	}
+
+	private_key *py_key =
+		(private_key *) _PyObject_New (&private_key_type);
+	py_key->key = key;
+	return (PyObject *) py_key;
+}
+
+static PyObject *
 get_extension (certificate_x509 *self, PyObject *args, PyObject *keywords)
 {
 	const char *oid = NULL;
@@ -273,7 +378,7 @@ get_extension (certificate_x509 *self, PyObject *args, PyObject *keywords)
 	length = get_extension_by_object (self->x509, obj, &value);
 	ASN1_OBJECT_free (obj);
 	if (value != NULL) {
-		PyObject *extension = PyString_FromStringAndSize (value,
+		PyObject *extension = PyBytes_FromStringAndSize (value,
 								  length);
 		free (value);
 		return extension;
@@ -298,15 +403,15 @@ get_all_extensions (certificate_x509 *self, PyObject *args)
 	for (i = 0; i < ext_count; i++) {
 		X509_EXTENSION *ext = X509_get_ext (self->x509, i);
 
-		OBJ_obj2txt (oid, MAX_BUF, ext->object, 1);
+		OBJ_obj2txt (oid, MAX_BUF, X509_EXTENSION_get_object(ext), 1);
 		PyObject *key = PyString_FromString (oid);
 
 		char *value = NULL;
 		size_t length =
-			get_extension_by_object (self->x509, ext->object,
+			get_extension_by_object (self->x509, X509_EXTENSION_get_object(ext),
 						 &value);
 
-		PyObject *dict_value = PyString_FromStringAndSize (value,
+		PyObject *dict_value = PyBytes_FromStringAndSize (value,
 								   length);
 		free (value);
 		PyDict_SetItem (dict, key, dict_value);
@@ -327,6 +432,26 @@ as_pem (certificate_x509 *self, PyObject *args)
 
 	BIO *bio = BIO_new (BIO_s_mem ());
 	PEM_write_bio_X509 (bio, self->x509);
+
+	size_t size = BIO_ctrl_pending (bio);
+	char *buf = malloc (sizeof (char) * size);
+	BIO_read (bio, buf, size);
+	BIO_free (bio);
+
+	PyObject *pem = PyString_FromStringAndSize (buf, size);
+	free (buf);
+	return pem;
+}
+
+static PyObject *
+as_text (certificate_x509 *self, PyObject *args)
+{
+	if (!PyArg_ParseTuple (args, "")) {
+		return NULL;
+	}
+
+	BIO *bio = BIO_new (BIO_s_mem ());
+	X509_print (bio, self->x509);
 
 	size_t size = BIO_ctrl_pending (bio);
 	char *buf = malloc (sizeof (char) * size);
@@ -378,7 +503,7 @@ get_subject (certificate_x509 *self, PyObject *args)
 		PyObject *key =
 			PyString_FromString (OBJ_nid2sn (OBJ_obj2nid (obj)));
 		PyObject *value = PyString_FromString ((const char *)
-						       ASN1_STRING_data (data));
+						       ASN1_STRING_get0_data (data));
 		PyDict_SetItem (dict, key, value);
 
 		Py_DECREF (key);
@@ -408,7 +533,7 @@ get_issuer (certificate_x509 *self, PyObject *args)
 		PyObject *key =
 			PyString_FromString (OBJ_nid2sn (OBJ_obj2nid (obj)));
 		PyObject *value = PyString_FromString ((const char *)
-						       ASN1_STRING_data (data));
+						       ASN1_STRING_get0_data (data));
 		PyDict_SetItem (dict, key, value);
 
 		Py_DECREF (key);
@@ -451,14 +576,37 @@ get_not_after (certificate_x509 *self, PyObject *args)
 static PyMethodDef cert_methods[] = {
 	{"load", (PyCFunction) load_cert, METH_VARARGS | METH_KEYWORDS,
 	 "load a certificate from a file"},
+	{"load_private_key", (PyCFunction) load_private_key, METH_VARARGS | METH_KEYWORDS,
+	 "load a private key from a file"},
 	{NULL}
 };
 
+#if PY_MAJOR_VERSION >= 3
+static struct PyModuleDef moduledef = {
+	PyModuleDef_HEAD_INIT,
+	"_certificate",
+	NULL,
+	0,
+	cert_methods,
+	NULL,
+	NULL,
+	NULL,
+	NULL
+};
+
+PyMODINIT_FUNC
+PyInit__certificate (void)
+#else
 PyMODINIT_FUNC
 init_certificate (void)
+#endif
 {
 	PyObject *module;
+	#if PY_MAJOR_VERSION >= 3
+	module = PyModule_Create (&moduledef);
+	#else
 	module = Py_InitModule ("_certificate", cert_methods);
+	#endif
 
 	certificate_x509_type.tp_new = PyType_GenericNew;
 	if (PyType_Ready (&certificate_x509_type) < 0) {
@@ -468,4 +616,16 @@ init_certificate (void)
 	Py_INCREF (&certificate_x509_type);
 	PyModule_AddObject (module, "X509",
 			    (PyObject *) & certificate_x509_type);
+
+    private_key_type.tp_new = PyType_GenericNew;
+	if (PyType_Ready (&private_key_type) < 0) {
+		return;
+	}
+
+	Py_INCREF (&private_key_type);
+	PyModule_AddObject (module, "PrivateKey",
+			    (PyObject *) & private_key_type);
+	#if PY_MAJOR_VERSION >= 3
+	return module;
+	#endif
 }

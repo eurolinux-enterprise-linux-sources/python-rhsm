@@ -55,6 +55,7 @@ SERVER_DEFAULTS = {
         'proxy_user': '',
         'proxy_port': '',
         'proxy_password': '',
+        'no_proxy': '',
         }
 RHSM_DEFAULTS = {
         'baseurl': 'https://' + DEFAULT_CDN_HOSTNAME,
@@ -72,7 +73,8 @@ RHSM_DEFAULTS = {
 
 RHSMCERTD_DEFAULTS = {
         'certcheckinterval': '240',
-        'autoattachinterval': '1440'
+        'autoattachinterval': '1440',
+        'splay': '1'
         }
 
 LOGGING_DEFAULTS = {
@@ -144,7 +146,7 @@ class RhsmConfigParser(SafeConfigParser):
                 return self.get(section, prop)
             # If nothing has been changed (we couldn't fix it) re-raise the exception
             raise
-        except (NoOptionError, NoSectionError), er:
+        except (NoOptionError, NoSectionError) as er:
             try:
                 return DEFAULTS[section][prop.lower()]
             except KeyError:
@@ -220,6 +222,18 @@ class RhsmConfigParser(SafeConfigParser):
                 if self.get(section, key) and len(self.get(section, key).strip()) > 0:
                     result[key] = self.get(section, key)
         return result.items()
+
+    def options(self, section):
+        # This is necessary because with the way we handle defaults, parser.has_section('xyz')
+        # will return True if 'xyz' exists only in the defaults but parser.options('xyz')
+        #  will throw an exception.
+        items = set()
+        for key in DEFAULTS.get(section, {}):
+            items.add(key)
+        if self.has_section(section):
+            super_result = super(RhsmConfigParser, self).options(section)
+            items.update(super_result)
+        return list(items)
 
     def is_default(self, section, prop, value):
         if self.get_default(section, prop) == value:
