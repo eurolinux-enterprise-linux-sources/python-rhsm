@@ -1,0 +1,315 @@
+diff --git a/python-rhsm.spec b/python-rhsm.spec
+index 0318cc1..d2e00c1 100644
+--- a/python-rhsm.spec
++++ b/python-rhsm.spec
+@@ -13,7 +13,7 @@
+ 
+ Name: python-rhsm
+ Version: 1.15.4
+-Release: 2%{?dist}
++Release: 3%{?dist}
+ 
+ Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
+ Group: Development/Libraries
+@@ -74,6 +74,11 @@ rm -rf %{buildroot}
+ %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
+ 
+ %changelog
++* Wed Aug 12 2015 Chris Rog <crog@redhat.com> 1.15.4-3
++- Add user-agent to rhsm requests. (alikins@redhat.com)
++- 1247890: KeyErrors are now caught when checking manager capabilities
++  (csnyder@redhat.com)
++
+ * Thu Jul 23 2015 Chris Rog <crog@redhat.com> 1.15.4-2
+ - Fedora 20 has been retired. (awood@redhat.com)
+ 
+diff --git a/rel-eng/packages/python-rhsm b/rel-eng/packages/python-rhsm
+index ace4dde..c370a05 100644
+--- a/rel-eng/packages/python-rhsm
++++ b/rel-eng/packages/python-rhsm
+@@ -1 +1 @@
+-1.15.4-2 ./
++1.15.4-3 ./
+diff --git a/rel-eng/tito.props b/rel-eng/tito.props
+index fd057f6..6c86a16 100644
+--- a/rel-eng/tito.props
++++ b/rel-eng/tito.props
+@@ -1,4 +1,4 @@
+-[buildconfig]
+-builder = tito.builder.Builder
+-tagger = tito.tagger.VersionTagger
++[globalconfig]
++default_builder = tito.distributionbuilder.DistributionBuilder
++default_tagger = tito.tagger.ReleaseTagger
+ 
+diff --git a/src/rhsm/connection.py b/src/rhsm/connection.py
+index 465405d..f5cbbdf 100644
+--- a/src/rhsm/connection.py
++++ b/src/rhsm/connection.py
+@@ -43,7 +43,7 @@ except ImportError:
+     subman_version = "unknown"
+ 
+ from rhsm import ourjson as json
+-from rhsm.utils import get_env_proxy_info
++from rhsm import utils
+ 
+ global_socket_timeout = 60
+ timeout_altered = None
+@@ -115,6 +115,7 @@ def drift_check(utc_time_string, hours=1):
+     return drift
+ 
+ 
++
+ class ConnectionException(Exception):
+     pass
+ 
+@@ -264,7 +265,6 @@ class ContentConnection(object):
+         self.username = username
+         self.password = password
+         self.ssl_verify_depth = ssl_verify_depth
+-
+         self.timeout_altered = False
+ 
+         # get the proxy information from the environment variable
+@@ -275,13 +275,17 @@ class ContentConnection(object):
+                    'proxy_port': '',
+                    'proxy_password': ''}
+         else:
+-            info = get_env_proxy_info()
++            info = utils.get_env_proxy_info()
+ 
+         self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
+         self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
+         self.proxy_user = proxy_user or config.get('server', 'proxy_user') or info['proxy_username']
+         self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
+ 
++    @property
++    def user_agent(self):
++        return "RHSM-content/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
++
+     def _request(self, request_type, handler, body=None):
+         # See note in Restlib._request
+         context = SSL.Context("sslv23")
+@@ -304,7 +308,11 @@ class ContentConnection(object):
+ 
+         set_default_socket_timeout_if_python_2_3()
+ 
+-        conn.request("GET", handler, body="", headers={"Host": "%s:%s" % (self.host, self.ssl_port), "Content-Length": "0"})
++        conn.request("GET", handler,
++                     body="",
++                     headers={"Host": "%s:%s" % (self.host, self.ssl_port),
++                              "Content-Length": "0",
++                              "User-Agent": self.user_agent})
+         response = conn.getresponse()
+         result = {
+             "content": response.read(),
+@@ -383,6 +391,9 @@ class Restlib(object):
+         self.apihandler = apihandler
+         lc = _get_locale()
+ 
++        # Default, updated by UepConnection
++        self.user_agent = "python-rhsm-user-agent"
++
+         self.headers = {"Content-type": "application/json",
+                         "Accept": "application/json",
+                         "x-python-rhsm-version": python_rhsm_version,
+@@ -492,6 +503,7 @@ class Restlib(object):
+         else:
+             conn = httpslib.HTTPSConnection(self.host, self.ssl_port, ssl_context=context)
+ 
++
+         if info is not None:
+             body = json.dumps(info, default=json.encode)
+         else:
+@@ -499,6 +511,9 @@ class Restlib(object):
+ 
+         log.debug("Making request: %s %s" % (request_type, handler))
+ 
++        if self.user_agent:
++            self.headers['User-Agent'] = self.user_agent
++
+         headers = self.headers
+         if body is None:
+             headers = dict(self.headers.items() +
+@@ -665,7 +680,7 @@ class UEPConnection:
+                    'proxy_port': '',
+                    'proxy_password': ''}
+         else:
+-            info = get_env_proxy_info()
++            info = utils.get_env_proxy_info()
+ 
+         self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
+         self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
+@@ -731,6 +746,8 @@ class UEPConnection:
+                     ssl_verify_depth=self.ssl_verify_depth)
+             auth_description = "auth=none"
+ 
++        self.conn.user_agent = "RHSM/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
++
+         self.resources = None
+         self.capabilities = None
+         connection_description = ""
+@@ -771,21 +788,27 @@ class UEPConnection:
+     def _load_manager_capabilities(self):
+         """
+         Loads manager capabilities by doing a GET on the status
+-        resource located at '/status/'
+-        """
+-        self.capabilities = {}
+-        self.capabilities = self.conn.request_get("/status/")
+-        self.capabilities = self.capabilities['managerCapabilities']
+-        log.debug("Server has the following capabilities: %s",
+-                  self.capabilities)
++        resource located at '/status'
++        """
++        status = self.getStatus()
++        capabilities = status.get('managerCapabilities')
++        if capabilities is None:
++            log.debug("The status retrieved did not \
++                      include key 'managerCapabilities'.\nStatus:'%s'" % status)
++            capabilities = []
++        elif isinstance(capabilities, list) and not capabilities:
++            log.debug("The managerCapabilities list \
++                      was empty\nStatus:'%s'" % status)
++        else:
++            log.debug("Server has the following capabilities: %s", capabilities)
++        return capabilities
+ 
+     def has_capability(self, capability):
+         """
+         Check if the server we're connected to has a particular capability.
+         """
+         if self.capabilities is None:
+-            self._load_manager_capabilities()
+-
++            self.capabilities = self._load_manager_capabilities()
+         return capability in self.capabilities
+ 
+     def shutDown(self):
+diff --git a/src/rhsm/utils.py b/src/rhsm/utils.py
+index dd41161..f1a7f4e 100644
+--- a/src/rhsm/utils.py
++++ b/src/rhsm/utils.py
+@@ -17,6 +17,7 @@ import gettext
+ import os
+ import re
+ from urlparse import urlparse
++
+ from rhsm.config import DEFAULT_PROXY_PORT
+ 
+ _ = lambda x: gettext.ldgettext("rhsm", x)
+@@ -232,3 +233,24 @@ def get_env_proxy_info():
+         else:
+             the_proxy['proxy_port'] = int(info[3])
+     return the_proxy
++
++
++def cmd_name(argv):
++    """Attempt to get a meaningful command name from argv.
++
++    This handles cases where argv[0] isn't helpful (for
++    example, '/usr/bin/python' or '__main__.py'.
++    """
++    argv0 = os.path.basename(argv[0])
++    argvdir = os.path.dirname(argv[0])
++    head, tail = os.path.split(argvdir)
++
++    cmd_name_string = argv0
++    # initial-setup is launched as 'python -m initial_setup', so
++    # sys.argv looks like
++    # ['/usr/lib/python2.7/site-packages/initial_setup/__main__.py'],
++    # so we look for initial_setup in the exe path.
++    if tail == "initial_setup":
++        cmd_name_string = "initial-setup"
++
++    return cmd_name_string
+diff --git a/test/unit/connection-tests.py b/test/unit/connection-tests.py
+index 6e449ad..8a0091d 100644
+--- a/test/unit/connection-tests.py
++++ b/test/unit/connection-tests.py
+@@ -37,6 +37,26 @@ class ConnectionTests(unittest.TestCase):
+         self.cp = UEPConnection(username="dummy", password="dummy",
+                 handler="/Test/", insecure=True)
+ 
++    def test_load_manager_capabilities(self):
++        expected_capabilities = ['hypervisors_async', 'cores']
++        proper_status = {'version':'1',
++                         'result':True,
++                         'managerCapabilities':expected_capabilities}
++        improper_status = dict.copy(proper_status)
++        # Remove the managerCapabilities key from the dict
++        del improper_status['managerCapabilities']
++        self.cp.conn = Mock()
++        # The first call will return the proper_status, the second, the improper
++        # status
++        original_getStatus = self.cp.getStatus
++        self.cp.getStatus = Mock(side_effect=[proper_status,
++                                                     improper_status])
++        actual_capabilities = self.cp._load_manager_capabilities()
++        self.assertEquals(sorted(actual_capabilities),
++                          sorted(expected_capabilities))
++        self.assertEquals([], self.cp._load_manager_capabilities())
++        self.cp.getStatus = original_getStatus
++
+     def test_get_environment_by_name_requires_owner(self):
+         self.assertRaises(Exception, self.cp.getEnvironment, None, {"name": "env name"})
+ 
+diff --git a/test/unit/util-tests.py b/test/unit/util-tests.py
+index c650d74..4d4a65b 100644
+--- a/test/unit/util-tests.py
++++ b/test/unit/util-tests.py
+@@ -6,7 +6,7 @@ from rhsm.utils import remove_scheme, get_env_proxy_info, \
+     ServerUrlParseErrorEmpty, ServerUrlParseErrorNone, \
+     ServerUrlParseErrorPort, ServerUrlParseErrorScheme, \
+     ServerUrlParseErrorJustScheme, has_bad_scheme, has_good_scheme, \
+-    parse_url
++    parse_url, cmd_name
+ from rhsm.config import DEFAULT_PORT, DEFAULT_PREFIX, DEFAULT_HOSTNAME, \
+     DEFAULT_CDN_HOSTNAME, DEFAULT_CDN_PORT, DEFAULT_CDN_PREFIX
+ 
+@@ -379,3 +379,45 @@ class TestProxyInfo(unittest.TestCase):
+             self.assertEquals(None, proxy_info["proxy_password"])
+             self.assertEquals("host", proxy_info["proxy_hostname"])
+             self.assertEquals(int("1111"), proxy_info["proxy_port"])
++
++
++class TestCmdName(unittest.TestCase):
++    def test_usr_sbin(self):
++        argv = ['/usr/sbin/subscription-manager', 'list']
++        self.assertEquals("subscription-manager", cmd_name(argv))
++
++    def test_bin(self):
++        argv = ['bin/subscription-manager', 'subscribe', '--auto']
++        self.assertEquals("subscription-manager", cmd_name(argv))
++
++    def test_sbin(self):
++        argv = ['/sbin/subscription-manager', 'list']
++        self.assertEquals("subscription-manager", cmd_name(argv))
++
++    def test_subscription_manager_gui(self):
++        argv = ['/sbin/subscription-manager-gui']
++        self.assertEquals("subscription-manager-gui", cmd_name(argv))
++
++    def test_initial_setup(self):
++        argv = ['/usr/lib/python2.7/site-packages/initial_setup/__main__.py']
++        self.assertEquals("initial-setup", cmd_name(argv))
++
++    def test_yum(self):
++        argv = ['/bin/yum', 'install', 'zsh']
++        self.assertEquals("yum", cmd_name(argv))
++
++    def test_rhsmcertd_worker(self):
++        argv = ['/usr/libexec/rhsmcertd-worker']
++        self.assertEquals("rhsmcertd-worker", cmd_name(argv))
++
++    def test_rhsm_debug(self):
++        argv = ['/bin/rhsm-debug']
++        self.assertEquals("rhsm-debug", cmd_name(argv))
++
++    def test_virt_who(self):
++        argv = ['/usr/share/virt-who/virtwho.py']
++        self.assertEquals("virtwho.py", cmd_name(argv))
++
++    def test_rhsmd(self):
++        argv = ['/usr/libexec/rhsmd', '-i', '-f', 'valid']
++        self.assertEquals("rhsmd", cmd_name(argv))

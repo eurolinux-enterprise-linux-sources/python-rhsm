@@ -1,0 +1,181 @@
+diff --git a/python-rhsm.spec b/python-rhsm.spec
+index d2e00c1..d998de9 100644
+--- a/python-rhsm.spec
++++ b/python-rhsm.spec
+@@ -13,7 +13,7 @@
+ 
+ Name: python-rhsm
+ Version: 1.15.4
+-Release: 3%{?dist}
++Release: 4%{?dist}
+ 
+ Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
+ Group: Development/Libraries
+@@ -74,6 +74,10 @@ rm -rf %{buildroot}
+ %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
+ 
+ %changelog
++* Wed Sep 02 2015 Chris Rog <crog@redhat.com> 1.15.4-4
++- Adds RateLimitExceededException which is raised in response to 429 from the
++  remote host (csnyder@redhat.com)
++
+ * Wed Aug 12 2015 Chris Rog <crog@redhat.com> 1.15.4-3
+ - Add user-agent to rhsm requests. (alikins@redhat.com)
+ - 1247890: KeyErrors are now caught when checking manager capabilities
+diff --git a/rel-eng/packages/python-rhsm b/rel-eng/packages/python-rhsm
+index c370a05..6f475ed 100644
+--- a/rel-eng/packages/python-rhsm
++++ b/rel-eng/packages/python-rhsm
+@@ -1 +1 @@
+-1.15.4-3 ./
++1.15.4-4 ./
+diff --git a/src/rhsm/connection.py b/src/rhsm/connection.py
+index f5cbbdf..c4d0264 100644
+--- a/src/rhsm/connection.py
++++ b/src/rhsm/connection.py
+@@ -115,7 +115,6 @@ def drift_check(utc_time_string, hours=1):
+     return drift
+ 
+ 
+-
+ class ConnectionException(Exception):
+     pass
+ 
+@@ -137,9 +136,10 @@ class BadCertificateException(ConnectionException):
+ 
+ class RestlibException(ConnectionException):
+ 
+-    def __init__(self, code, msg=None):
++    def __init__(self, code, msg=None, headers=None):
+         self.code = code
+         self.msg = msg or ""
++        self.headers = headers or {}
+ 
+     def __str__(self):
+         return self.msg
+@@ -192,6 +192,17 @@ class AuthenticationException(RemoteServerException):
+         return buf
+ 
+ 
++class RateLimitExceededException(RestlibException):
++    def __init__(self, code,
++                 msg=None,
++                 headers=None):
++        super(RateLimitExceededException, self).__init__(code,
++                                                         msg)
++        self.headers = headers or {}
++        self.msg = msg or ""
++        self.retry_after = safe_int(self.headers.get('Retry-After'))
++
++
+ class UnauthorizedException(AuthenticationException):
+     prefix = "Unauthorized"
+ 
+@@ -316,7 +327,8 @@ class ContentConnection(object):
+         response = conn.getresponse()
+         result = {
+             "content": response.read(),
+-            "status": response.status}
++            "status": response.status,
++            "headers": dict(response.getheaders())}
+ 
+         return result
+ 
+@@ -503,7 +515,6 @@ class Restlib(object):
+         else:
+             conn = httpslib.HTTPSConnection(self.host, self.ssl_port, ssl_context=context)
+ 
+-
+         if info is not None:
+             body = json.dumps(info, default=json.encode)
+         else:
+@@ -534,6 +545,7 @@ class Restlib(object):
+         result = {
+             "content": response.read(),
+             "status": response.status,
++            "headers": dict(response.getheaders())
+         }
+ 
+         response_log = 'Response: status=' + str(result['status'])
+@@ -588,10 +600,15 @@ class Restlib(object):
+                 # had more meaningful exceptions. We've gotten a response from
+                 # the server that means something.
+ 
++                error_msg = self._parse_msg_from_error_response_body(parsed)
++                if str(response['status']) in ['429']:
++                    raise RateLimitExceededException(response['status'],
++                                                     error_msg,
++                                                     headers=response.get('headers'))
++
+                 # FIXME: we can get here with a valid json response that
+                 # could be anything, we don't verify it anymore
+-                error_msg = self._parse_msg_from_error_response_body(parsed)
+-                raise RestlibException(response['status'], error_msg)
++                raise RestlibException(response['status'], error_msg, response.get('headers'))
+             else:
+                 # This really needs an exception mapper too...
+                 if str(response['status']) in ["404", "410", "500", "502", "503", "504"]:
+@@ -606,6 +623,9 @@ class Restlib(object):
+                     raise ForbiddenException(response['status'],
+                                              request_type=request_type,
+                                              handler=handler)
++                elif str(response['status']) in ['429']:
++                    raise RateLimitExceededException(response['status'])
++
+                 else:
+                     # unexpected with no valid content
+                     raise NetworkException(response['status'])
+diff --git a/test/unit/connection-tests.py b/test/unit/connection-tests.py
+index 8a0091d..a17b3ed 100644
+--- a/test/unit/connection-tests.py
++++ b/test/unit/connection-tests.py
+@@ -20,7 +20,8 @@ import unittest
+ from rhsm.connection import UEPConnection, Restlib, ConnectionException, ConnectionSetupException, \
+         BadCertificateException, RestlibException, GoneException, NetworkException, \
+         RemoteServerException, drift_check, ExpiredIdentityCertException, UnauthorizedException, \
+-        ForbiddenException, AuthenticationException, set_default_socket_timeout_if_python_2_3
++        ForbiddenException, AuthenticationException, set_default_socket_timeout_if_python_2_3, \
++        RateLimitExceededException
+ 
+ from mock import Mock, patch
+ from datetime import date
+@@ -157,9 +158,11 @@ class RestlibValidateResponseTests(unittest.TestCase):
+         self.request_type = "GET"
+         self.handler = "https://server/path"
+ 
+-    def vr(self, status, content):
++    def vr(self, status, content, headers=None):
+         response = {'status': status,
+                     'content': content}
++        if headers:
++            response['headers'] = headers
+         #print "response", response
+         self.restlib.validateResponse(response, self.request_type, self.handler)
+ 
+@@ -347,6 +350,26 @@ class RestlibValidateResponseTests(unittest.TestCase):
+         else:
+             self.fail("Should have raised a GoneException")
+ 
++    def test_429_empty(self):
++        try:
++            self.vr("429", "")
++        except RateLimitExceededException, e:
++            self.assertEquals("429", e.code)
++        else:
++            self.fail("Should have raised a RateLimitExceededException")
++
++    def test_429_body(self):
++        content = u'{"errors": ["TooFast"]}'
++        headers = {'Retry-After': 20}
++        try:
++            self.vr("429", content, headers)
++        except RateLimitExceededException, e:
++            self.assertEquals(20, e.retry_after)
++            self.assertEquals("TooFast", e.msg)
++            self.assertEquals("429", e.code)
++        else:
++            self.fail("Should have raised a RateLimitExceededException")
++
+     def test_500_empty(self):
+         try:
+             self.vr("500", "")

@@ -1,0 +1,42 @@
+diff --git a/python-rhsm.spec b/python-rhsm.spec
+index 56bb1e7..0318cc1 100644
+--- a/python-rhsm.spec
++++ b/python-rhsm.spec
+@@ -13,7 +13,7 @@
+ 
+ Name: python-rhsm
+ Version: 1.15.4
+-Release: 1%{?dist}
++Release: 2%{?dist}
+ 
+ Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
+ Group: Development/Libraries
+@@ -74,6 +74,9 @@ rm -rf %{buildroot}
+ %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
+ 
+ %changelog
++* Thu Jul 23 2015 Chris Rog <crog@redhat.com> 1.15.4-2
++- Fedora 20 has been retired. (awood@redhat.com)
++
+ * Fri Jul 10 2015 Chris Rog <crog@redhat.com> 1.15.4-1
+ - 
+ 
+diff --git a/rel-eng/packages/python-rhsm b/rel-eng/packages/python-rhsm
+index 8ff10ef..ace4dde 100644
+--- a/rel-eng/packages/python-rhsm
++++ b/rel-eng/packages/python-rhsm
+@@ -1 +1 @@
+-1.15.4-1 ./
++1.15.4-2 ./
+diff --git a/rel-eng/releasers.conf b/rel-eng/releasers.conf
+index 6c37bf7..faabcb0 100644
+--- a/rel-eng/releasers.conf
++++ b/rel-eng/releasers.conf
+@@ -1,6 +1,6 @@
+ [fedora]
+ releaser = tito.release.FedoraGitReleaser
+-branches = master f22 f21 f20
++branches = master f23 f22 f21
+ 
+ [rhel-7.1]
+ releaser = tito.release.DistGitReleaser
