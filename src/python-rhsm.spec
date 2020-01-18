@@ -12,7 +12,7 @@
 %{!?__global_ldflags: %global __global_ldflags -Wl,-z,relro -Wl,-z,now}
 
 Name: python-rhsm
-Version: 1.17.10
+Version: 1.17.9
 Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
@@ -97,9 +97,6 @@ rm -rf %{buildroot}
 %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
-* Thu May 25 2017 Kevin Howell <khowell@redhat.com> 1.17.10-1
-- 1455549: Honor no_proxy environment variable (khowell@redhat.com)
-
 * Wed Sep 07 2016 Christopher Snyder <csnyder@redhat.com> 1.17.9-1
 - 1367243: Handle RestlibException 404 in refresh (khowell@redhat.com)
 
