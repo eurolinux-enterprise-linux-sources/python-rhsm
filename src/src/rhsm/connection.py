@@ -43,40 +43,9 @@ except ImportError:
     subman_version = "unknown"
 
 from rhsm import ourjson as json
-from rhsm.utils import get_env_proxy_info
+from rhsm import utils
 
-global_socket_timeout = 60
-timeout_altered = None
-
-
-def set_default_socket_timeout_if_python_2_3():
-    """If using python 2.3 set a global socket default timeout.
-
-    On EL5/python2.3, there is a really long socket timeout. The
-    best thing we can do is set a process wide default socket timeout.
-    Limit this to affected python versions only, just to minimize any
-    problems the default timeout might cause.
-
-    Return True if we change it.
-    """
-
-    global timeout_altered
-
-    # once per module instance should be plenty
-    if timeout_altered:
-        return timeout_altered
-
-    if sys.version_info[0] == 2 and sys.version_info[1] < 4:
-        socket.setdefaulttimeout(global_socket_timeout)
-        timeout_altered = True
-        return
-
-    timeout_altered = False
-
-
-class NullHandler(logging.Handler):
-    def emit(self, record):
-        pass
+config = initConfig()
 
 
 def safe_int(value, safe_value=None):
@@ -86,17 +55,9 @@ def safe_int(value, safe_value=None):
         return safe_value
 
 
-h = NullHandler()
-logging.getLogger("rhsm").addHandler(h)
-
-log = logging.getLogger(__name__)
-
-config = initConfig()
-
-
 def drift_check(utc_time_string, hours=1):
     """
-    Takes in a RFC 1123 date and returns True if the currnet time
+    Takes in a RFC 1123 date and returns True if the current time
     is greater then the supplied number of hours
     """
     drift = False
@@ -109,10 +70,20 @@ def drift_check(utc_time_string, hours=1):
             local_datetime = datetime.datetime.utcnow().replace(tzinfo=utc_datetime.tzinfo)
             delta = datetime.timedelta(hours=hours)
             drift = abs((utc_datetime - local_datetime)) > delta
-        except Exception, e:
+        except Exception as e:
             log.error(e)
 
     return drift
+
+
+class NullHandler(logging.Handler):
+    def emit(self, record):
+        pass
+
+h = NullHandler()
+logging.getLogger("rhsm").addHandler(h)
+
+log = logging.getLogger(__name__)
 
 
 class ConnectionException(Exception):
@@ -135,10 +106,16 @@ class BadCertificateException(ConnectionException):
 
 
 class RestlibException(ConnectionException):
+    """
+    Raised when a response with a valid json body is received along with a status code
+    that is not in [200, 202, 204, 410, 429]
+    See RestLib.validateResponse to see when this and other exceptions are raised.
+    """
 
-    def __init__(self, code, msg=None):
+    def __init__(self, code, msg=None, headers=None):
         self.code = code
         self.msg = msg or ""
+        self.headers = headers or {}
 
     def __str__(self):
         return self.msg
@@ -146,8 +123,15 @@ class RestlibException(ConnectionException):
 
 class GoneException(RestlibException):
     """
-    GoneException - used to detect when a consumer has been deleted on the
-    candlepin side.
+    GoneException is used to detect when a consumer has been deleted on the candlepin side.
+
+    A client handling a GoneException should verify that GoneException.deleted_id
+    matches the consumer uuid before taking any action (like deleting the consumer
+    cert from disk).
+
+    This is to prevent an errant 410 response from candlepin (or a reverse_proxy in
+    front of it, or it's app server, or an injected response) from causing
+    accidental consumer cert deletion.
     """
     def __init__(self, code, msg, deleted_id):
         # Exception doesn't inherit from object on el5 python version
@@ -156,6 +140,11 @@ class GoneException(RestlibException):
 
 
 class NetworkException(ConnectionException):
+    """
+    Thrown when the response of a request has no valid json content
+    and the http status code is anything other than the following:
+    [200, 202, 204, 401, 403, 410, 429, 500, 502, 503, 504]
+    """
 
     def __init__(self, code):
         self.code = code
@@ -165,7 +154,10 @@ class NetworkException(ConnectionException):
 
 
 class RemoteServerException(ConnectionException):
-
+    """
+    Thrown when the response to a request has no valid json content and
+    one of these http status codes: [404, 410, 500, 502, 503, 504]
+    """
     def __init__(self, code,
                  request_type=None,
                  handler=None):
@@ -191,21 +183,42 @@ class AuthenticationException(RemoteServerException):
         return buf
 
 
+class RateLimitExceededException(RestlibException):
+    """
+    Thrown in response to a http code 429.
+    This means that too many requests have been made in a given time period.
+    The retry_after attribute is an int of seconds to retry the request after.
+    The retry_after attribute may not be included in the response.
+    """
+    def __init__(self, code,
+                 msg=None,
+                 headers=None):
+        super(RateLimitExceededException, self).__init__(code,
+                                                         msg)
+        self.headers = headers or {}
+        self.msg = msg or ""
+        self.retry_after = safe_int(self.headers.get('Retry-After'))
+
+
 class UnauthorizedException(AuthenticationException):
+    """
+    Thrown in response to http status code 401 with no valid json content
+    """
     prefix = "Unauthorized"
 
 
 class ForbiddenException(AuthenticationException):
+    """
+    Thrown in response to http status code 403 with no valid json content
+    """
     prefix = "Forbidden"
 
 
 class ExpiredIdentityCertException(ConnectionException):
-
     pass
 
 
 class NoOpChecker:
-
     def __init__(self, host=None, peerCertHash=None, peerCertDigest='sha1'):
         self.host = host
         self.fingerprint = peerCertHash
@@ -215,7 +228,55 @@ class NoOpChecker:
         return True
 
 
+class HTTPSConnection(httpslib.HTTPSConnection):
+    """M2Crypto doesn't allow us to set the timeout on the SSL connection in HTTPSConnection.
+    Therefore, we subclass."""
+    def __init__(self, host, *args, **kwargs):
+        self.rhsm_timeout = float(kwargs.pop('timeout', -1.0))
+        httpslib.HTTPSConnection.__init__(self, host, *args, **kwargs)
+
+    def connect(self):
+        """Copied verbatim except for adding the timeout"""
+        error = None
+        # We ignore the returned sockaddr because SSL.Connection.connect needs
+        # a host name.
+        for (family, _, _, _, _) in socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM):
+            sock = None
+            try:
+                sock = SSL.Connection(self.ssl_ctx, family=family)
+                sock.settimeout(self.rhsm_timeout)
+                if self.session is not None:
+                    sock.set_session(self.session)
+                sock.connect((self.host, self.port))
+
+                self.sock = sock
+                sock = None
+                return
+            except socket.error as e:
+                # Other exception are probably SSL-related, in that case we
+                # abort and the exception is forwarded to the caller.
+                error = e
+            finally:
+                if sock is not None:
+                    sock.close()
+
+        if error is None:
+            raise AssertionError("Empty list returned by getaddrinfo")
+        raise error
+
+
 class RhsmProxyHTTPSConnection(httpslib.ProxyHTTPSConnection):
+    def __init__(self, host, *args, **kwargs):
+        self.rhsm_timeout = float(kwargs.pop('timeout', -1.0))
+        httpslib.ProxyHTTPSConnection.__init__(self, host, *args, **kwargs)
+
+    def _start_ssl(self):
+        self.sock = SSL.Connection(self.ssl_ctx, self.sock)
+        self.sock.settimeout(self.rhsm_timeout)
+        self.sock.setup_ssl()
+        self.sock.set_connect_state()
+        self.sock.connect_ssl()
+
     # 2.7 httplib expects to be able to pass a body argument to
     # endheaders, which the m2crypto.httpslib.ProxyHTTPSConnect does
     # not support
@@ -249,9 +310,9 @@ class ContentConnection(object):
                  proxy_hostname=None, proxy_port=None,
                  proxy_user=None, proxy_password=None,
                  ca_dir=None, insecure=False,
-                 ssl_verify_depth=1):
+                 ssl_verify_depth=1, timeout=None):
 
-        log.debug("ContectConnection")
+        log.debug("ContentConnection")
         # FIXME
         self.ent_dir = "/etc/pki/entitlement"
         self.handler = "/"
@@ -259,28 +320,30 @@ class ContentConnection(object):
 
         self.host = host or config.get('server', 'hostname')
         self.ssl_port = ssl_port or safe_int(config.get('server', 'port'))
+        self.timeout = timeout or safe_int(config.get('server', 'server_timeout'))
         self.ca_dir = ca_dir
         self.insecure = insecure
         self.username = username
         self.password = password
         self.ssl_verify_depth = ssl_verify_depth
 
-        self.timeout_altered = False
-
-        # get the proxy information from the environment variable
-        # if available and host is not in no_proxy
+        # honor no_proxy environment variable
         if urllib.proxy_bypass_environment(self.host):
-            info = {'proxy_username': '',
-                   'proxy_hostname': '',
-                   'proxy_port': '',
-                   'proxy_password': ''}
+            self.proxy_hostname = None
+            self.proxy_port = None
+            self.proxy_user = None
+            self.proxy_password = None
         else:
-            info = get_env_proxy_info()
+            info = utils.get_env_proxy_info()
 
-        self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
-        self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
-        self.proxy_user = proxy_user or config.get('server', 'proxy_user') or info['proxy_username']
-        self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
+            self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
+            self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
+            self.proxy_user = proxy_user or config.get('server', 'proxy_user') or info['proxy_username']
+            self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
+
+    @property
+    def user_agent(self):
+        return "RHSM-content/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
 
     def _request(self, request_type, handler, body=None):
         # See note in Restlib._request
@@ -296,19 +359,22 @@ class ContentConnection(object):
             conn = RhsmProxyHTTPSConnection(self.proxy_hostname, self.proxy_port,
                                             username=self.proxy_user,
                                             password=self.proxy_password,
-                                            ssl_context=context)
+                                            ssl_context=context, timeout=self.timeout)
             # this connection class wants the full url
             handler = "https://%s:%s%s" % (self.host, self.ssl_port, handler)
         else:
-            conn = httpslib.HTTPSConnection(self.host, safe_int(self.ssl_port), ssl_context=context)
+            conn = HTTPSConnection(self.host, safe_int(self.ssl_port), ssl_context=context, timeout=self.timeout)
 
-        set_default_socket_timeout_if_python_2_3()
-
-        conn.request("GET", handler, body="", headers={"Host": "%s:%s" % (self.host, self.ssl_port), "Content-Length": "0"})
+        conn.request("GET", handler,
+                     body="",
+                     headers={"Host": "%s:%s" % (self.host, self.ssl_port),
+                              "Content-Length": "0",
+                              "User-Agent": self.user_agent})
         response = conn.getresponse()
         result = {
             "content": response.read(),
-            "status": response.status}
+            "status": response.status,
+            "headers": dict(response.getheaders())}
 
         return result
 
@@ -320,12 +386,12 @@ class ContentConnection(object):
                     key_path = os.path.join(self.ent_dir, "%s-key.pem" % cert_file.split('.', 1)[0])
                     log.debug("Loading CA certificate: '%s'" % cert_path)
 
-                    #FIXME: reenable res =
+                    # FIXME: reenable res =
                     context.load_verify_info(cert_path)
                     context.load_cert(cert_path, key_path)
-                    #if res == 0:
-                    #    raise BadCertificateException(cert_path)
-        except OSError, e:
+                    # if res == 0:
+                    #     raise BadCertificateException(cert_path)
+        except OSError as e:
             raise ConnectionSetupException(e.strerror)
 
     def test(self):
@@ -371,17 +437,22 @@ def _get_locale():
 class Restlib(object):
     """
      A wrapper around httplib to make rest calls easier
+     See validateResponse() to learn when exceptions are raised as a result
+     of communication with the server.
     """
     def __init__(self, host, ssl_port, apihandler,
             username=None, password=None,
             proxy_hostname=None, proxy_port=None,
             proxy_user=None, proxy_password=None,
             cert_file=None, key_file=None,
-            ca_dir=None, insecure=False, ssl_verify_depth=1):
+            ca_dir=None, insecure=False, ssl_verify_depth=1, timeout=None):
         self.host = host
         self.ssl_port = ssl_port
         self.apihandler = apihandler
         lc = _get_locale()
+
+        # Default, updated by UepConnection
+        self.user_agent = "python-rhsm-user-agent"
 
         self.headers = {"Content-type": "application/json",
                         "Accept": "application/json",
@@ -397,6 +468,7 @@ class Restlib(object):
         self.insecure = insecure
         self.username = username
         self.password = password
+        self.timeout = timeout
         self.ssl_verify_depth = ssl_verify_depth
         self.proxy_hostname = proxy_hostname
         self.proxy_port = proxy_port
@@ -451,7 +523,7 @@ class Restlib(object):
         if loaded_ca_certs:
             log.debug("Loaded CA certificates from %s: %s" % (self.ca_dir, ', '.join(loaded_ca_certs)))
 
-    # FIXME: can method be emtpty?
+    # FIXME: can method be empty?
     def _request(self, request_type, method, info=None):
         handler = self.apihandler + method
 
@@ -486,11 +558,11 @@ class Restlib(object):
             conn = RhsmProxyHTTPSConnection(self.proxy_hostname, self.proxy_port,
                                             username=self.proxy_user,
                                             password=self.proxy_password,
-                                            ssl_context=context)
+                                            ssl_context=context, timeout=self.timeout)
             # this connection class wants the full url
             handler = "https://%s:%s%s" % (self.host, self.ssl_port, handler)
         else:
-            conn = httpslib.HTTPSConnection(self.host, self.ssl_port, ssl_context=context)
+            conn = HTTPSConnection(self.host, self.ssl_port, ssl_context=context, timeout=self.timeout)
 
         if info is not None:
             body = json.dumps(info, default=json.encode)
@@ -499,13 +571,13 @@ class Restlib(object):
 
         log.debug("Making request: %s %s" % (request_type, handler))
 
+        if self.user_agent:
+            self.headers['User-Agent'] = self.user_agent
+
         headers = self.headers
         if body is None:
             headers = dict(self.headers.items() +
                            {"Content-Length": "0"}.items())
-
-        # NOTE: alters global timeout_altered (and socket timeout)
-        set_default_socket_timeout_if_python_2_3()
 
         try:
             conn.request(request_type, handler, body=body, headers=headers)
@@ -519,6 +591,7 @@ class Restlib(object):
         result = {
             "content": response.read(),
             "status": response.status,
+            "headers": dict(response.getheaders())
         }
 
         response_log = 'Response: status=' + str(result['status'])
@@ -561,22 +634,30 @@ class Restlib(object):
                     log.exception(e)
 
             if parsed:
-                # find and raise a GoneException on '410' with 'deleteId' in the
-                # content, implying that the resource has been deleted
+                # Find and raise a GoneException on '410' with 'deletedId' in the
+                # content, implying that the resource has been deleted.
+
                 # NOTE: a 410 with a unparseable content will raise
-                # RemoteServerException
+                # RemoteServerException and will not cause the client
+                # to delete the consumer cert.
                 if str(response['status']) == "410":
                     raise GoneException(response['status'],
-                        parsed['displayMessage'], parsed['deletedId'])
+                                        parsed['displayMessage'],
+                                        parsed['deletedId'])
 
                 # I guess this is where we would have an exception mapper if we
                 # had more meaningful exceptions. We've gotten a response from
                 # the server that means something.
 
+                error_msg = self._parse_msg_from_error_response_body(parsed)
+                if str(response['status']) in ['429']:
+                    raise RateLimitExceededException(response['status'],
+                                                     error_msg,
+                                                     headers=response.get('headers'))
+
                 # FIXME: we can get here with a valid json response that
                 # could be anything, we don't verify it anymore
-                error_msg = self._parse_msg_from_error_response_body(parsed)
-                raise RestlibException(response['status'], error_msg)
+                raise RestlibException(response['status'], error_msg, response.get('headers'))
             else:
                 # This really needs an exception mapper too...
                 if str(response['status']) in ["404", "410", "500", "502", "503", "504"]:
@@ -591,6 +672,9 @@ class Restlib(object):
                     raise ForbiddenException(response['status'],
                                              request_type=request_type,
                                              handler=handler)
+                elif str(response['status']) in ['429']:
+                    raise RateLimitExceededException(response['status'])
+
                 else:
                     # unexpected with no valid content
                     raise NetworkException(response['status'])
@@ -640,7 +724,8 @@ class UEPConnection:
             proxy_password=None,
             username=None, password=None,
             cert_file=None, key_file=None,
-            insecure=None):
+            insecure=None,
+            timeout=None):
         """
         Two ways to authenticate:
             - username/password for HTTP basic authentication. (owner admin role)
@@ -652,25 +737,25 @@ class UEPConnection:
         self.host = host or config.get('server', 'hostname')
         self.ssl_port = ssl_port or safe_int(config.get('server', 'port'))
         self.handler = handler or config.get('server', 'prefix')
+        self.timeout = timeout or safe_int(config.get('server', 'server_timeout'))
 
         # remove trailing "/" from the prefix if it is there
         # BZ848836
         self.handler = self.handler.rstrip("/")
 
-        # get the proxy information from the environment variable
-        # if available and host is not in no_proxy
+        # honor no_proxy environment variable
         if urllib.proxy_bypass_environment(self.host):
-            info = {'proxy_username': '',
-                   'proxy_hostname': '',
-                   'proxy_port': '',
-                   'proxy_password': ''}
+            self.proxy_hostname = None
+            self.proxy_port = None
+            self.proxy_user = None
+            self.proxy_password = None
         else:
-            info = get_env_proxy_info()
+            info = utils.get_env_proxy_info()
 
-        self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
-        self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
-        self.proxy_user = proxy_user or config.get('server', 'proxy_user') or info['proxy_username']
-        self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
+            self.proxy_hostname = proxy_hostname or config.get('server', 'proxy_hostname') or info['proxy_hostname']
+            self.proxy_port = proxy_port or config.get('server', 'proxy_port') or info['proxy_port']
+            self.proxy_user = proxy_user or config.get('server', 'proxy_user') or info['proxy_username']
+            self.proxy_password = proxy_password or config.get('server', 'proxy_password') or info['proxy_password']
 
         self.cert_file = cert_file
         self.key_file = key_file
@@ -698,9 +783,9 @@ class UEPConnection:
         if using_basic_auth and using_id_cert_auth:
             raise Exception("Cannot specify both username/password and "
                     "cert_file/key_file")
-        #if not (using_basic_auth or using_id_cert_auth):
-        #    raise Exception("Must specify either username/password or "
-        #            "cert_file/key_file")
+        # if not (using_basic_auth or using_id_cert_auth):
+        #     raise Exception("Must specify either username/password or "
+        #         "cert_file/key_file")
 
         proxy_description = None
         if self.proxy_hostname and self.proxy_port:
@@ -713,7 +798,7 @@ class UEPConnection:
                     proxy_hostname=self.proxy_hostname, proxy_port=self.proxy_port,
                     proxy_user=self.proxy_user, proxy_password=self.proxy_password,
                     ca_dir=self.ca_cert_dir, insecure=self.insecure,
-                    ssl_verify_depth=self.ssl_verify_depth)
+                    ssl_verify_depth=self.ssl_verify_depth, timeout=self.timeout)
             auth_description = "auth=basic username=%s" % username
         elif using_id_cert_auth:
             self.conn = Restlib(self.host, self.ssl_port, self.handler,
@@ -721,15 +806,17 @@ class UEPConnection:
                                 proxy_hostname=self.proxy_hostname, proxy_port=self.proxy_port,
                                 proxy_user=self.proxy_user, proxy_password=self.proxy_password,
                                 ca_dir=self.ca_cert_dir, insecure=self.insecure,
-                                ssl_verify_depth=self.ssl_verify_depth)
+                                ssl_verify_depth=self.ssl_verify_depth, timeout=self.timeout)
             auth_description = "auth=identity_cert ca_dir=%s verify=%s" % (self.ca_cert_dir, self.insecure)
         else:
             self.conn = Restlib(self.host, self.ssl_port, self.handler,
                     proxy_hostname=self.proxy_hostname, proxy_port=self.proxy_port,
                     proxy_user=self.proxy_user, proxy_password=self.proxy_password,
                     ca_dir=self.ca_cert_dir, insecure=self.insecure,
-                    ssl_verify_depth=self.ssl_verify_depth)
+                    ssl_verify_depth=self.ssl_verify_depth, timeout=self.timeout)
             auth_description = "auth=none"
+
+        self.conn.user_agent = "RHSM/1.0 (cmd=%s)" % utils.cmd_name(sys.argv)
 
         self.resources = None
         self.capabilities = None
@@ -771,21 +858,27 @@ class UEPConnection:
     def _load_manager_capabilities(self):
         """
         Loads manager capabilities by doing a GET on the status
-        resource located at '/status/'
+        resource located at '/status'
         """
-        self.capabilities = {}
-        self.capabilities = self.conn.request_get("/status/")
-        self.capabilities = self.capabilities['managerCapabilities']
-        log.debug("Server has the following capabilities: %s",
-                  self.capabilities)
+        status = self.getStatus()
+        capabilities = status.get('managerCapabilities')
+        if capabilities is None:
+            log.debug("The status retrieved did not \
+                      include key 'managerCapabilities'.\nStatus:'%s'" % status)
+            capabilities = []
+        elif isinstance(capabilities, list) and not capabilities:
+            log.debug("The managerCapabilities list \
+                      was empty\nStatus:'%s'" % status)
+        else:
+            log.debug("Server has the following capabilities: %s", capabilities)
+        return capabilities
 
     def has_capability(self, capability):
         """
         Check if the server we're connected to has a particular capability.
         """
         if self.capabilities is None:
-            self._load_manager_capabilities()
-
+            self.capabilities = self._load_manager_capabilities()
         return capability in self.capabilities
 
     def shutDown(self):
@@ -832,22 +925,28 @@ class UEPConnection:
 
         return self.conn.request_post(url, params)
 
-    def hypervisorCheckIn(self, owner, env, host_guest_mapping):
+    def hypervisorCheckIn(self, owner, env, host_guest_mapping, options=None):
         """
         Sends a mapping of hostIds to list of guestIds to candlepin
         to be registered/updated.
+        This method can raise the following exceptions:
+            - RestLibException with http code 400: this means no mapping
+            (or a bad one) was provided.
+            - RestLibException with other http codes: Please see the
+            definition of RestLibException above for info about this.
+            - RateLimitExceededException: This means that too many requests
+            have been made in the given time period.
 
-        host_guest_mapping is as follows:
-
-        {
-            'host-id-1': ['guest-id-1', 'guest-id-2'],
-            'host-id-2': ['guest-id-3', 'guest-id-4']
-        }
         """
         if (self.has_capability("hypervisors_async")):
             priorContentType = self.conn.headers['Content-type']
             self.conn.headers['Content-type'] = 'text/plain'
-            query_params = urlencode({"env": env, "cloaked": False})
+
+            params = {"env": env, "cloaked": False}
+            if options and options.reporter_id and len(options.reporter_id) > 0:
+                params['reporter_id'] = options.reporter_id
+
+            query_params = urlencode(params)
             url = "/hypervisors/%s?%s" % (owner, query_params)
             res = self.conn.request_post(url, host_guest_mapping)
             self.conn.headers['Content-type'] = priorContentType
@@ -877,6 +976,11 @@ class UEPConnection:
 
         Note that installed_products and guest_uuids expects a certain format,
         example parsing is in subscription-manager's format_for_server() method.
+
+        This can raise the following exceptions:
+            - RestlibException - This will include an http error code and a
+            translated message that provides some detail as to what happend.
+            - GoneException - This indicates that the consumer has been deleted
         """
         params = {}
         if installed_products is not None:
@@ -1068,8 +1172,7 @@ class UEPConnection:
         This will cause the UEP to look for one or more pools which provide
         access to the given product.
         """
-        args = "&".join(["product=" + product.replace(" ", "%20")
-                        for product in products])
+        args = "&".join(["product=" + product.replace(" ", "%20") for product in products])
         method = "/consumers/%s/entitlements?%s" % (str(consumerId), args)
         return self.conn.request_post(method)
 
@@ -1104,6 +1207,10 @@ class UEPConnection:
 
     def unbindBySerial(self, consumerId, serial):
         method = "/consumers/%s/certificates/%s" % (self.sanitize(consumerId), self.sanitize(str(serial)))
+        return self.conn.request_delete(method)
+
+    def unbindByPoolId(self, consumer_uuid, pool_id):
+        method = "/consumers/%s/entitlements/pool/%s" % (self.sanitize(consumer_uuid), self.sanitize(pool_id))
         return self.conn.request_delete(method)
 
     def unbindAll(self, consumerId):
@@ -1156,8 +1263,8 @@ class UEPConnection:
             method = "%s?consumer=%s" % (method, self.sanitize(consumerId))
         return self.conn.request_get(method)
 
-    def getProduct(self, product_id):
-        method = "/products/%s" % self.sanitize(product_id)
+    def getProduct(self, product_uuid):
+        method = "/products/%s" % self.sanitize(product_uuid)
         return self.conn.request_get(method)
 
     def getRelease(self, consumerId):
@@ -1235,6 +1342,58 @@ class UEPConnection:
         method = "/consumers/%s" % self.sanitize(consumerId)
         return self.conn.request_post(method)
 
+    def regenEntitlementCertificates(self, consumer_id, lazy_regen=True):
+        """
+        Regenerates all entitlements for the given consumer
+        """
+
+        method = "/consumers/%s/certificates" % self.sanitize(consumer_id)
+
+        if lazy_regen:
+            method += "?lazy_regen=true"
+
+        result = False
+
+        try:
+            self.conn.request_put(method)
+            result = True
+        except (RemoteServerException, httpslib.BadStatusLine, RestlibException) as e:
+            # 404s indicate that the service is unsupported (Candlepin too old, or SAM)
+            if isinstance(e, httpslib.BadStatusLine) or str(e.code) == "404":
+                log.debug("Unable to refresh entitlement certificates: Service currently unsupported.")
+                log.debug(e)
+            else:
+                # Something else happened that we should probabaly raise
+                raise e
+
+        return result
+
+    def regenEntitlementCertificate(self, consumer_id, entitlement_id, lazy_regen=True):
+        """
+        Regenerates the specified entitlement for the given consumer
+        """
+
+        method = "/consumers/%s/certificates?entitlement=%s" % (self.sanitize(consumer_id), self.sanitize(entitlement_id))
+
+        if lazy_regen:
+            method += "&lazy_regen=true"
+
+        result = False
+
+        try:
+            self.conn.request_put(method)
+            result = True
+        except (RemoteServerException, httpslib.BadStatusLine, RestlibException) as e:
+            # 404s indicate that the service is unsupported (Candlepin too old, or SAM)
+            if isinstance(e, httpslib.BadStatusLine) or str(e.code) == "404":
+                log.debug("Unable to refresh entitlement certificates: Service currently unsupported.")
+                log.debug(e)
+            else:
+                # Something else happened that we should probabaly raise
+                raise e
+
+        return result
+
     def getStatus(self):
         method = "/status"
         return self.conn.request_get(method)
@@ -1304,8 +1463,8 @@ class UEPConnection:
         return results
 
     def sanitize(self, url_param, plus=False):
-        #This is a wrapper around urllib.quote to avoid issues like the one
-        #discussed in http://bugs.python.org/issue9301
+        # This is a wrapper around urllib.quote to avoid issues like the one
+        # discussed in http://bugs.python.org/issue9301
         if plus:
             sane_string = urllib.quote_plus(str(url_param))
         else:

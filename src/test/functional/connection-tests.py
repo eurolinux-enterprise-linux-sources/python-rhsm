@@ -16,14 +16,12 @@
 import os
 import random
 import string
-import time
 import unittest
 
 from nose.plugins.attrib import attr
 
-from rhsm.connection import ContentConnection, UEPConnection, drift_check, Restlib,\
-    UnauthorizedException, ForbiddenException, AuthenticationException, RestlibException, \
-    RemoteServerException
+from rhsm.connection import ContentConnection, UEPConnection, Restlib,\
+    UnauthorizedException, ForbiddenException, RestlibException
 from mock import patch
 
 
@@ -38,8 +36,7 @@ def random_string(name, target_length=32):
 class ConnectionTests(unittest.TestCase):
 
     def setUp(self):
-        self.cp = UEPConnection(username="admin", password="admin",
-                insecure=True)
+        self.cp = UEPConnection(username="admin", password="admin", insecure=True)
 
         self.consumer = self.cp.registerConsumer("test-consumer", "system", owner="admin")
         self.consumer_uuid = self.consumer['uuid']
@@ -133,7 +130,7 @@ class ConnectionTests(unittest.TestCase):
     def test_get_owner_hypervisors(self):
         testing_hypervisor_id = random_string("testHypervisor")
         self.cp.updateConsumer(self.consumer_uuid, hypervisor_id=testing_hypervisor_id)
-        hypervisor_id = self.cp.getConsumer(self.consumer_uuid)['hypervisorId']
+        self.cp.getConsumer(self.consumer_uuid)['hypervisorId']
 
         hypervisors = self.cp.getOwnerHypervisors("admin", [testing_hypervisor_id])
 
@@ -145,17 +142,73 @@ class ConnectionTests(unittest.TestCase):
 
 
 @attr('functional')
+class EntitlementRegenerationTests(unittest.TestCase):
+    def setUp(self):
+        self.cp = UEPConnection(username="admin", password="admin", insecure=True)
+
+        self.consumer = self.cp.registerConsumer("test-consumer", "system", owner="admin")
+        self.consumer_uuid = self.consumer['uuid']
+
+        # This product is present in the Candlepin test data
+        self.cp.bindByProduct(self.consumer_uuid, ["awesomeos-instancebased"])
+
+        entitlements = self.cp.getEntitlementList(self.consumer_uuid)
+        self.assertTrue(len(entitlements) > 0)
+
+        self.entitlement = entitlements[0]
+        self.entitlement_id = self.entitlement['id']
+
+    def test_regenerate_entitlements_default(self):
+        result = self.cp.regenEntitlementCertificates(self.consumer_uuid)
+        self.assertTrue(result)
+
+    def test_regenerate_entitlements_lazy(self):
+        result = self.cp.regenEntitlementCertificates(self.consumer_uuid, True)
+        self.assertTrue(result)
+
+    def test_regenerate_entitlements_eager(self):
+        result = self.cp.regenEntitlementCertificates(self.consumer_uuid, False)
+        self.assertTrue(result)
+
+    def test_regenerate_entitlements_bad_uuid(self):
+        with self.assertRaises(RestlibException):
+            self.cp.regenEntitlementCertificates("bad_consumer_uuid")
+
+    def test_regenerate_entitlement_default(self):
+        result = self.cp.regenEntitlementCertificate(self.consumer_uuid, self.entitlement_id)
+        self.assertTrue(result)
+
+    def test_regenerate_entitlement_lazy(self):
+        result = self.cp.regenEntitlementCertificate(self.consumer_uuid, self.entitlement_id, True)
+        self.assertTrue(result)
+
+    def test_regenerate_entitlement_eager(self):
+        result = self.cp.regenEntitlementCertificate(self.consumer_uuid, self.entitlement_id, False)
+        self.assertTrue(result)
+
+    def test_regenerate_entitlement_bad_consumer_uuid(self):
+        with self.assertRaises(RestlibException):
+            self.cp.regenEntitlementCertificate("bad_consumer_uuid", self.entitlement_id)
+
+    def test_regenerate_entitlement_bad_entitlement_id(self):
+        with self.assertRaises(RestlibException):
+            self.cp.regenEntitlementCertificate(self.consumer_uuid, "bad_entitlement_id")
+
+    def tearDown(self):
+        self.cp.unregisterConsumer(self.consumer_uuid)
+
+
+@attr('functional')
 class BindRequestTests(unittest.TestCase):
     def setUp(self):
-        self.cp = UEPConnection(username="admin", password="admin",
-                insecure=True)
+        self.cp = UEPConnection(username="admin", password="admin", insecure=True)
 
         consumerInfo = self.cp.registerConsumer("test-consumer", "system", owner="admin")
         self.consumer_uuid = consumerInfo['uuid']
 
-    @patch.object(Restlib,'validateResponse')
+    @patch.object(Restlib, 'validateResponse')
     @patch('rhsm.connection.drift_check', return_value=False)
-    @patch('M2Crypto.httpslib.HTTPSConnection', auto_spec=True)
+    @patch('rhsm.connection.HTTPSConnection', auto_spec=True)
     def test_bind_no_args(self, mock_conn, mock_drift, mock_validate):
 
         self.cp.bind(self.consumer_uuid)
@@ -168,9 +221,9 @@ class BindRequestTests(unittest.TestCase):
             if name == '().request':
                 self.assertEquals(None, kwargs['body'])
 
-    @patch.object(Restlib,'validateResponse')
+    @patch.object(Restlib, 'validateResponse')
     @patch('rhsm.connection.drift_check', return_value=False)
-    @patch('M2Crypto.httpslib.HTTPSConnection', auto_spec=True)
+    @patch('rhsm.connection.HTTPSConnection', auto_spec=True)
     def test_bind_by_pool(self, mock_conn, mock_drift, mock_validate):
         # this test is just to verify we make the httplib connection with
         # right args, we don't validate the bind here
@@ -182,9 +235,6 @@ class BindRequestTests(unittest.TestCase):
 
 @attr('functional')
 class ContentConnectionTests(unittest.TestCase):
-
-#    def setUp(self):
-#        self.cc = ContentConnection(insecure=True)
 
     def testInsecure(self):
         ContentConnection(host="127.0.0.1", insecure=True)
@@ -289,7 +339,7 @@ class RestlibTests(unittest.TestCase):
         try:
             self._validate_response(mock_response)
             self.fail("An exception should have been thrown.")
-        except Exception, ex:
+        except Exception as ex:
             self.assertTrue(isinstance(ex, RestlibException))
             self.assertEquals(expected_error, ex.code)
             self.assertEqual(expected_error, str(ex))
@@ -299,7 +349,7 @@ class RestlibTests(unittest.TestCase):
         try:
             self._validate_response(mock_response)
             self.fail("An %s exception should have been thrown." % expected_exception)
-        except Exception, ex:
+        except Exception as ex:
             self.assertTrue(isinstance(ex, expected_exception))
             self.assertEquals(expected_error_code, ex.code)
 

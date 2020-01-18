@@ -1,14 +1,12 @@
-import os
 import unittest
 
-from mock import Mock, patch
+from mock import patch
 from rhsm.utils import remove_scheme, get_env_proxy_info, \
     ServerUrlParseErrorEmpty, ServerUrlParseErrorNone, \
     ServerUrlParseErrorPort, ServerUrlParseErrorScheme, \
     ServerUrlParseErrorJustScheme, has_bad_scheme, has_good_scheme, \
-    parse_url
-from rhsm.config import DEFAULT_PORT, DEFAULT_PREFIX, DEFAULT_HOSTNAME, \
-    DEFAULT_CDN_HOSTNAME, DEFAULT_CDN_PORT, DEFAULT_CDN_PREFIX
+    parse_url, cmd_name
+from rhsm.config import DEFAULT_PORT, DEFAULT_PREFIX, DEFAULT_HOSTNAME
 
 
 class TestParseServerInfo(unittest.TestCase):
@@ -85,9 +83,9 @@ class TestParseServerInfo(unittest.TestCase):
 
     def test_hostname_with_scheme(self):
         # this is the default, so test it here
-        local_url = "https://subscription.rhn.redhat.com/subscription"
+        local_url = "https://subscription.rhsm.redhat.com/subscription"
         (username, password, hostname, port, prefix) = parse_url(local_url)
-        self.assertEquals("subscription.rhn.redhat.com", hostname)
+        self.assertEquals("subscription.rhsm.redhat.com", hostname)
         self.assertEquals(None, port)
         self.assertEquals("/subscription", prefix)
 
@@ -316,8 +314,8 @@ class TestProxyInfo(unittest.TestCase):
         Return an environment with everything empty except
         those passed in variables.
         """
-        proxy_env = {'HTTPS_PROXY':'', 'https_proxy':'',
-                     'HTTP_PROXY':'', 'http_proxy':''}
+        proxy_env = {'HTTPS_PROXY': '', 'https_proxy': '',
+                     'HTTP_PROXY': '', 'http_proxy': ''}
         if variables:
             for (key, value) in variables.items():
                 proxy_env[key] = value
@@ -379,3 +377,45 @@ class TestProxyInfo(unittest.TestCase):
             self.assertEquals(None, proxy_info["proxy_password"])
             self.assertEquals("host", proxy_info["proxy_hostname"])
             self.assertEquals(int("1111"), proxy_info["proxy_port"])
+
+
+class TestCmdName(unittest.TestCase):
+    def test_usr_sbin(self):
+        argv = ['/usr/sbin/subscription-manager', 'list']
+        self.assertEquals("subscription-manager", cmd_name(argv))
+
+    def test_bin(self):
+        argv = ['bin/subscription-manager', 'subscribe', '--auto']
+        self.assertEquals("subscription-manager", cmd_name(argv))
+
+    def test_sbin(self):
+        argv = ['/sbin/subscription-manager', 'list']
+        self.assertEquals("subscription-manager", cmd_name(argv))
+
+    def test_subscription_manager_gui(self):
+        argv = ['/sbin/subscription-manager-gui']
+        self.assertEquals("subscription-manager-gui", cmd_name(argv))
+
+    def test_initial_setup(self):
+        argv = ['/usr/lib/python2.7/site-packages/initial_setup/__main__.py']
+        self.assertEquals("initial-setup", cmd_name(argv))
+
+    def test_yum(self):
+        argv = ['/bin/yum', 'install', 'zsh']
+        self.assertEquals("yum", cmd_name(argv))
+
+    def test_rhsmcertd_worker(self):
+        argv = ['/usr/libexec/rhsmcertd-worker']
+        self.assertEquals("rhsmcertd-worker", cmd_name(argv))
+
+    def test_rhsm_debug(self):
+        argv = ['/bin/rhsm-debug']
+        self.assertEquals("rhsm-debug", cmd_name(argv))
+
+    def test_virt_who(self):
+        argv = ['/usr/share/virt-who/virtwho.py']
+        self.assertEquals("virtwho.py", cmd_name(argv))
+
+    def test_rhsmd(self):
+        argv = ['/usr/libexec/rhsmd', '-i', '-f', 'valid']
+        self.assertEquals("rhsmd", cmd_name(argv))

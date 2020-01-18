@@ -13,14 +13,12 @@
 # granted to use or replicate Red Hat trademarks that are incorporated
 # in this software or its documentation.
 #
-
-import sys
 import unittest
 
 from rhsm.connection import UEPConnection, Restlib, ConnectionException, ConnectionSetupException, \
         BadCertificateException, RestlibException, GoneException, NetworkException, \
         RemoteServerException, drift_check, ExpiredIdentityCertException, UnauthorizedException, \
-        ForbiddenException, AuthenticationException, set_default_socket_timeout_if_python_2_3
+        ForbiddenException, AuthenticationException, RateLimitExceededException, ContentConnection
 
 from mock import Mock, patch
 from datetime import date
@@ -29,13 +27,36 @@ from rhsm import ourjson as json
 
 
 class ConnectionTests(unittest.TestCase):
-
     def setUp(self):
         # NOTE: this won't actually work, idea for this suite of unit tests
         # is to mock the actual server responses and just test logic in the
         # UEPConnection:
         self.cp = UEPConnection(username="dummy", password="dummy",
                 handler="/Test/", insecure=True)
+
+    def test_accepts_a_timeout(self):
+        self.cp = UEPConnection(username="dummy", password="dummy",
+                handler="/Test/", insecure=True, timeout=3)
+
+    def test_load_manager_capabilities(self):
+        expected_capabilities = ['hypervisors_async', 'cores']
+        proper_status = {'version': '1',
+                         'result': True,
+                         'managerCapabilities': expected_capabilities}
+        improper_status = dict.copy(proper_status)
+        # Remove the managerCapabilities key from the dict
+        del improper_status['managerCapabilities']
+        self.cp.conn = Mock()
+        # The first call will return the proper_status, the second, the improper
+        # status
+        original_getStatus = self.cp.getStatus
+        self.cp.getStatus = Mock(side_effect=[proper_status,
+                                                     improper_status])
+        actual_capabilities = self.cp._load_manager_capabilities()
+        self.assertEquals(sorted(actual_capabilities),
+                          sorted(expected_capabilities))
+        self.assertEquals([], self.cp._load_manager_capabilities())
+        self.cp.getStatus = original_getStatus
 
     def test_get_environment_by_name_requires_owner(self):
         self.assertRaises(Exception, self.cp.getEnvironment, None, {"name": "env name"})
@@ -130,6 +151,24 @@ class ConnectionTests(unittest.TestCase):
         expected_guestIds = [guestId['guestId'] for guestId in guestIds]
         self.assertEquals(expected_guestIds, resultGuestIds)
 
+    def test_uep_connection_honors_no_proxy_setting(self):
+        with patch.dict('os.environ', {'no_proxy': 'foobar'}):
+            uep = UEPConnection(host="foobar", username="dummy", password="dummy", handler="/Test/", insecure=True,
+                                proxy_hostname="proxyfoo", proxy_password="proxypass", proxy_port=42, proxy_user="foo")
+            self.assertIs(None, uep.proxy_user)
+            self.assertIs(None, uep.proxy_password)
+            self.assertIs(None, uep.proxy_hostname)
+            self.assertIs(None, uep.proxy_port)
+
+    def test_content_connection_honors_no_proxy_setting(self):
+        with patch.dict('os.environ', {'no_proxy': 'foobar'}):
+            connection = ContentConnection(host="foobar", username="dummy", password="dummy", insecure=True,
+                                           proxy_hostname="proxyfoo", proxy_password="proxypass", proxy_port=42,
+                                           proxy_user="foo")
+            self.assertIs(None, connection.proxy_user)
+            self.assertIs(None, connection.proxy_password)
+            self.assertIs(None, connection.proxy_hostname)
+            self.assertIs(None, connection.proxy_port)
 
 class RestlibValidateResponseTests(unittest.TestCase):
     def setUp(self):
@@ -137,10 +176,11 @@ class RestlibValidateResponseTests(unittest.TestCase):
         self.request_type = "GET"
         self.handler = "https://server/path"
 
-    def vr(self, status, content):
+    def vr(self, status, content, headers=None):
         response = {'status': status,
                     'content': content}
-        #print "response", response
+        if headers:
+            response['headers'] = headers
         self.restlib.validateResponse(response, self.request_type, self.handler)
 
     # All empty responses that aren't 200/204 raise a NetworkException
@@ -175,8 +215,8 @@ class RestlibValidateResponseTests(unittest.TestCase):
 
     # MOVED PERMANENTLY
     # FIXME: implement 301 support?
-    #def test_301_empty(self):
-    #    self.vr("301", "")
+    # def test_301_empty(self):
+    #     self.vr("301", "")
 
     def test_400_empty(self):
         # FIXME: not sure 400 makes sense as "NetworkException"
@@ -192,7 +232,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
     def test_401_empty(self):
         try:
             self.vr("401", "")
-        except UnauthorizedException, e:
+        except UnauthorizedException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals("401", e.code)
             expected_str = "Server error attempting a GET to https://server/path returned status 401\n" \
@@ -205,7 +245,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{this is not json</> dfsdf"" '
         try:
             self.vr("401", content)
-        except UnauthorizedException, e:
+        except UnauthorizedException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals("401", e.code)
             expected_str = "Server error attempting a GET to https://server/path returned status 401\n" \
@@ -220,7 +260,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{"errors": ["Forbidden message"]}'
         try:
             self.vr("401", content)
-        except UnauthorizedException, e:
+        except UnauthorizedException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals("401", e.code)
             expected_str = "Server error attempting a GET to https://server/path returned status 401\n" \
@@ -233,7 +273,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{"errors": ["Forbidden message"]}'
         try:
             self.vr("403", content)
-        except RestlibException, e:
+        except RestlibException as e:
             self.assertEquals("403", e.code)
             self.assertEquals("Forbidden message", e.msg)
         else:
@@ -242,7 +282,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
     def test_403_empty(self):
         try:
             self.vr("403", "")
-        except ForbiddenException, e:
+        except ForbiddenException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals("403", e.code)
             expected_str = "Server error attempting a GET to https://server/path returned status 403\n" \
@@ -255,7 +295,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{"errors": ["Unauthorized message"]}'
         try:
             self.vr("401", content)
-        except RestlibException, e:
+        except RestlibException as e:
             self.assertEquals("401", e.code)
             self.assertEquals("Unauthorized message", e.msg)
         else:
@@ -264,7 +304,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
     def test_404_empty(self):
         try:
             self.vr("404", "")
-        except RemoteServerException, e:
+        except RemoteServerException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals(self.handler, e.handler)
             self.assertEquals("404", e.code)
@@ -276,7 +316,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{"something": "whatever"}'
         try:
             self.vr("404", content)
-        except RestlibException, e:
+        except RestlibException as e:
             self.assertEquals("404", e.code)
             self.assertEquals("", e.msg)
         else:
@@ -286,10 +326,10 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{"displayMessage": "not found"}'
         try:
             self.vr("404", content)
-        except RestlibException, e:
+        except RestlibException as e:
             self.assertEquals("not found", e.msg)
             self.assertEquals("404", e.code)
-        except Exception, e:
+        except Exception as e:
             self.fail("RestlibException expected, got %s" % e)
         else:
             self.fail("RestlibException expected")
@@ -298,10 +338,10 @@ class RestlibValidateResponseTests(unittest.TestCase):
         content = u'{"errors": ["not found", "still not found"]}'
         try:
             self.vr("404", content)
-        except RestlibException, e:
+        except RestlibException as e:
             self.assertEquals("not found still not found", e.msg)
             self.assertEquals("404", e.code)
-        except Exception, e:
+        except Exception as e:
             self.fail("RestlibException expected, got %s" % e)
         else:
             self.fail("RestlibException expected")
@@ -309,7 +349,7 @@ class RestlibValidateResponseTests(unittest.TestCase):
     def test_410_emtpy(self):
         try:
             self.vr("410", "")
-        except RemoteServerException, e:
+        except RemoteServerException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals(self.handler, e.handler)
         else:
@@ -317,20 +357,40 @@ class RestlibValidateResponseTests(unittest.TestCase):
 
     def test_410_body(self):
         content = u'{"displayMessage": "foo", "deletedId": "12345"}'
-        #self.assertRaises(GoneException, self.vr, "410", content)
+        # self.assertRaises(GoneException, self.vr, "410", content)
         try:
             self.vr("410", content)
-        except GoneException, e:
+        except GoneException as e:
             self.assertEquals("12345", e.deleted_id)
             self.assertEquals("foo", e.msg)
             self.assertEquals("410", e.code)
         else:
             self.fail("Should have raised a GoneException")
 
+    def test_429_empty(self):
+        try:
+            self.vr("429", "")
+        except RateLimitExceededException as e:
+            self.assertEquals("429", e.code)
+        else:
+            self.fail("Should have raised a RateLimitExceededException")
+
+    def test_429_body(self):
+        content = u'{"errors": ["TooFast"]}'
+        headers = {'Retry-After': 20}
+        try:
+            self.vr("429", content, headers)
+        except RateLimitExceededException as e:
+            self.assertEquals(20, e.retry_after)
+            self.assertEquals("TooFast", e.msg)
+            self.assertEquals("429", e.code)
+        else:
+            self.fail("Should have raised a RateLimitExceededException")
+
     def test_500_empty(self):
         try:
             self.vr("500", "")
-        except RemoteServerException, e:
+        except RemoteServerException as e:
             self.assertEquals(self.request_type, e.request_type)
             self.assertEquals(self.handler, e.handler)
         else:
@@ -476,33 +536,6 @@ class DriftTest(unittest.TestCase):
     def test_no_drift(self):
         header = strftime("%a, %d %b %Y %H:%M:%S GMT", gmtime())
         self.assertFalse(drift_check(header))
-
-
-class SetDefaultSocketTimeoutIfPython2_3_Test(unittest.TestCase):
-    @patch.object(sys, 'version_info', (2, 7, 5, 'final', 0))
-    @patch('socket.setdefaulttimeout', return_value=None)
-    def test_newer_than_2_3_should_not_be_altered(self, mock_setdefaulttimeout):
-
-        set_default_socket_timeout_if_python_2_3()
-        # we should only ever set default timeout on python 2.3 or earlier
-        # Elsewhere we should leave it alone, and be set to the default of None
-        # See https://bugzilla.redhat.com/show_bug.cgi?id=1195446
-
-        if sys.version_info[0] != 2:
-            self.fail("This test only passes on python 2, not python3.")
-        if sys.version_info[1] < 3:
-            self.fail("Don't expect this or any other tests to work on python 2.2 or earlier.")
-
-        self.assertFalse(mock_setdefaulttimeout.called)
-
-    @patch.object(sys, 'version_info', (2, 3, 0, 'final', 0))
-    @patch('socket.setdefaulttimeout', return_value=None)
-    def test_2_3_should_be_altered_once(self, mock_setdefaulttimeout):
-
-        set_default_socket_timeout_if_python_2_3()
-        set_default_socket_timeout_if_python_2_3()
-
-        mock_setdefaulttimeout.assert_called_once_with(60)
 
 
 class GoneExceptionTest(ExceptionTest):

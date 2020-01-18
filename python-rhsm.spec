@@ -12,8 +12,8 @@
 %{!?__global_ldflags: %global __global_ldflags -Wl,-z,relro -Wl,-z,now}
 
 Name: python-rhsm
-Version: 1.15.4
-Release: 5%{?dist}
+Version: 1.17.10
+Release: 1%{?dist}
 
 Summary: A Python library to communicate with a Red Hat Unified Entitlement Platform
 Group: Development/Libraries
@@ -24,22 +24,27 @@ License: GPLv2
 # cd client/python-rhsm
 # tito build --tag python-rhsm-$VERSION-$RELEASE --tgz
 Source0: %{name}-%{version}.tar.gz
-Patch0: python-rhsm-1.15.4-1-to-python-rhsm-1.15.4-2.patch
-Patch1: python-rhsm-1.15.4-2-to-python-rhsm-1.15.4-3.patch
-Patch2: python-rhsm-1.15.4-3-to-python-rhsm-1.15.4-4.patch
-Patch3: python-rhsm-1.15.4-4-to-python-rhsm-1.15.4-5.patch
 URL: http://www.candlepinproject.org
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
+%if 0%{?sles_version}
+Requires: python-m2crypto
+%else
 Requires: m2crypto
+%endif
 Requires: python-iniparse
 Requires: rpm-python
 Requires: python-dateutil
 %if %use_simplejson
 Requires: python-simplejson
 %endif
+Requires: python-rhsm-certificates = %{version}-%{release}
 
+%if 0%{?sles_version}
+BuildRequires: python-devel >= 2.6
+%else
 BuildRequires: python2-devel
+%endif
 BuildRequires: python-setuptools
 BuildRequires: openssl-devel
 
@@ -49,12 +54,19 @@ A small library for communicating with the REST interface of a Red Hat Unified
 Entitlement Platform. This interface is used for the management of system
 entitlements, certificates, and access to content.
 
+
+%package certificates
+Summary: Certificates required to communicate with a Red Hat Unified Entitlement Platform
+Group: Development/Libraries
+
+%description certificates
+This package contains certificates required for communicating with the REST interface
+of a Red Hat Unified Entitlement Platform, used for the management of system entitlements
+and to receive access to content. Please note this package does not have a dependency on
+Python. The name instead reflects its relationship to python-rhsm.
+
 %prep
 %setup -q -n python-rhsm-%{version}
-%patch0 -p1
-%patch1 -p1
-%patch2 -p1
-%patch3 -p1
 
 %build
 # create a version.py with the rpm version info
@@ -74,28 +86,92 @@ rm -rf %{buildroot}
 %doc README
 
 %dir %{python_sitearch}/rhsm
-%attr(755,root,root) %dir %{_sysconfdir}/rhsm
-%attr(755,root,root) %dir %{_sysconfdir}/rhsm/ca
 
 %{python_sitearch}/rhsm/*
 %{python_sitearch}/rhsm-*.egg-info
+
+%files certificates
+%attr(755,root,root) %dir %{_sysconfdir}/rhsm
+%attr(755,root,root) %dir %{_sysconfdir}/rhsm/ca
+
 %attr(644,root,root) %{_sysconfdir}/rhsm/ca/*.pem
 
 %changelog
-* Thu Sep 10 2015 Chris Rog <crog@redhat.com> 1.15.4-5
-- 1242057: This cert is no longer used and can be removed (wpoteat@redhat.com)
+* Thu May 25 2017 Kevin Howell <khowell@redhat.com> 1.17.10-1
+- 1455549: Honor no_proxy environment variable (khowell@redhat.com)
 
-* Wed Sep 02 2015 Chris Rog <crog@redhat.com> 1.15.4-4
+* Wed Sep 07 2016 Christopher Snyder <csnyder@redhat.com> 1.17.9-1
+- 1367243: Handle RestlibException 404 in refresh (khowell@redhat.com)
+
+* Wed Sep 07 2016 Christopher Snyder <csnyder@redhat.com> 1.17.8-1
+- 1367243: Fix 404 check in regen entitlement funcs (khowell@redhat.com)
+
+* Fri Aug 26 2016 Vritant Jain <vrjain@redhat.com> 1.17.7-1
+- 1366301: Entitlement regeneration no longer propagates server errors
+  (crog@redhat.com)
+- 1365280: Update default_log_level to INFO (csnyder@redhat.com)
+
+* Tue Aug 09 2016 Vritant Jain <vrjain@redhat.com> 1.17.6-1
+- 1315901: Exception handling for PEM cert read (wpoteat@redhat.com)
+- 1334916: Add rhsm.conf logging section defaults (csnyder@redhat.com)
+- 1360909: Added functionality for regenerating entitlement certificates
+  (crog@redhat.com)
+
+* Thu Jun 30 2016 Vritant Jain <vrjain@redhat.com> 1.17.5-1
+- 1104332: Separate out the rhsm certs into a separate RPM (vrjain@redhat.com)
+
+* Tue Jun 21 2016 Vritant Jain <vrjain@redhat.com> 1.17.4-1
+- 1346417: Allow users to set socket timeout. (awood@redhat.com)
+- Fix Flake8 Errors (bcourt@redhat.com)
+- Add Fedora 24 to the branch list. (awood@redhat.com)
+- Added basic SLES compatibilty. Tested against SLES 11 SP3
+  (darinlively@gmail.com)
+
+* Thu May 12 2016 Darin Lively <darinlively@gmail.com> 1.17.3-0
+- Added basic SLES build compatibilty
+
+* Mon Apr 25 2016 Vritant Jain <vrjain@redhat.com> 1.17.2-1
+- Added 7.3 releaser (vrjain@redhat.com)
+- Updated UEPConnection.getProduct to explicitly reference product UUID
+  (crog@redhat.com)
+
+* Mon Feb 01 2016 Christopher Snyder <csnyder@redhat.com> 1.17.1-1
+- Bump version to 1.17.0 (csnyder@redhat.com)
+
+* Tue Jan 19 2016 Christopher Snyder <csnyder@redhat.com> 1.16.6-1
+- 1297337: change server strings to new default (wpoteat@redhat.com)
+
+* Wed Jan 06 2016 Christopher Snyder <csnyder@redhat.com> 1.16.5-1
+- 1271158: Updates documentation to better explain when exceptions are thrown
+  (csnyder@redhat.com)
+- 1272203: Default used in place of empty config entry (wpoteat@redhat.com)
+- 1284683: Entitlement certificate path checking allows for listing files
+  (wpoteat@redhat.com)
+- Fedora 21 is end of life. (awood@redhat.com)
+
+* Fri Dec 04 2015 Alex Wood <awood@redhat.com> 1.16.4-1
+- HypervisorCheckIn now accepts options as a keyword argument,
+  options.reporter_id is now sent if provided (csnyder@redhat.com)
+
+* Tue Dec 01 2015 Christopher Snyder <csnyder@redhat.com> 1.16.3-1
+- Added release target for RHEL 6.8 (crog@redhat.com)
+- 1198178: Adds wrapper method to allow removal of entitlements by pool id
+  (csnyder@redhat.com)
+- Expand the docs and comments about GoneException. (alikins@redhat.com)
+- Adieu dgoodwin. (awood@redhat.com)
+
+* Wed Sep 02 2015 Alex Wood <awood@redhat.com> 1.16.2-1
 - Adds RateLimitExceededException which is raised in response to 429 from the
   remote host (csnyder@redhat.com)
+- 1242057: This cert is no longer used and can be removed (wpoteat@redhat.com)
 
-* Wed Aug 12 2015 Chris Rog <crog@redhat.com> 1.15.4-3
-- Add user-agent to rhsm requests. (alikins@redhat.com)
+* Thu Aug 13 2015 Alex Wood <awood@redhat.com> 1.16.1-1
 - 1247890: KeyErrors are now caught when checking manager capabilities
   (csnyder@redhat.com)
+- Add user-agent to rhsm requests. (alikins@redhat.com)
 
-* Thu Jul 23 2015 Chris Rog <crog@redhat.com> 1.15.4-2
-- Fedora 20 has been retired. (awood@redhat.com)
+* Thu Jul 23 2015 Alex Wood <awood@redhat.com> 1.16.0-1
+- Bump to version 1.16 (crog@redhat.com)
 
 * Fri Jul 10 2015 Chris Rog <crog@redhat.com> 1.15.4-1
 - 

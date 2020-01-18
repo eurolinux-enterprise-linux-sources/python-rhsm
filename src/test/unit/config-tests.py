@@ -47,6 +47,7 @@ consumerCertDir = /etc/pki/consumer
 report_package_profile = 1
 pluginDir = /usr/lib/rhsm-plugins
 some_option = %(repo_ca_cert)stest
+manage_repos =
 
 [rhsmcertd]
 certCheckInterval = 245
@@ -175,6 +176,7 @@ def write_temp_file(data):
     fid.seek(0)
     return fid
 
+
 class BaseConfigTests(unittest.TestCase):
 
     def setUp(self):
@@ -276,7 +278,7 @@ class ConfigTests(BaseConfigTests):
         self.assertFalse(value)
 
     def test_is_default_true(self):
-        value = self.cfgParser.is_default('server', 'hostname', 'subscription.rhn.redhat.com')
+        value = self.cfgParser.is_default('server', 'hostname', 'subscription.rhsm.redhat.com')
         self.assertTrue(value)
 
     def test_is_default_false(self):
@@ -337,6 +339,17 @@ class SomeOptionConfigTest(BaseConfigTests):
         self.assertEquals("/etc/rhsm/ca-test/redhat-uep-non-default.pemtest", value)
 
 
+class BlankWithDefaultConfigTest(BaseConfigTests):
+    cfgfile_data = TEST_CONFIG
+
+    def test_get_blank_config_file_entry(self):
+        default_returned = False
+        for (name, value) in self.cfgParser.items("rhsm"):
+            if name == "manage_repos":
+                default_returned = (value == "1")
+        self.assertTrue(default_returned)
+
+
 class OldConfigTests(ConfigTests):
     cfgfile_data = OLD_CONFIG
 
@@ -373,6 +386,7 @@ class BrokenConfigTests(ConfigTests):
     def test_not_a_section(self):
         self.assertRaises(NoSectionError,
                 self.cfgParser.get, "not_a_section", "not_an_option")
+
 
 class InterpErrorTests(BaseConfigTests):
     cfgfile_data = INTERPOLATION_ERROR_CONFIG
